@@ -1,6 +1,9 @@
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from modules.analyzer import Pick
 
+ET = ZoneInfo("America/New_York")
 
 CONFIDENCE_EMOJI = {
     "Alta": "🔥",
@@ -10,7 +13,7 @@ CONFIDENCE_EMOJI = {
 
 
 def format_message(picks: list[Pick]) -> str:
-    today = date.today().strftime("%d/%m/%Y")
+    today = datetime.now(ET).strftime("%d/%m/%Y")
     lines = [
         f"🏀 *NBA DAILY DREAM BET* — {today}",
         f"{'─' * 32}",
@@ -31,14 +34,19 @@ def format_message(picks: list[Pick]) -> str:
         ]
 
         if pick.props:
-            lines.append("🎯 *Props destacados:*")
+            if pick.low_confidence_props:
+                lines.append("⚠️ *Props \\(Baja confianza — ninguno supera 60% prob\\):*")
+            else:
+                lines.append("🎯 *Props destacados:*")
             for prop in pick.props:
+                hit_pct = f"{prop['hit_rate']*100:.0f}%"
                 price_str = f" ({prop['price']:+d})" if isinstance(prop["price"], int) else ""
                 lines.append(
-                    f"  • {prop['player']} — {prop['market']} {prop['side']} {prop['line']}{price_str}"
+                    f"  • {prop['player']} — {prop['market']} {prop['side']} "
+                    f"{prop['line']}{price_str} \\[prob: {hit_pct}\\]"
                 )
 
         lines.append("")
 
-    lines.append("_Análisis generado automáticamente. Apostá con responsabilidad._")
+    lines.append("_Análisis generado automáticamente\\. Apostá con responsabilidad\\._")
     return "\n".join(lines)

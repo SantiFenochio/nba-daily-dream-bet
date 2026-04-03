@@ -1,5 +1,9 @@
 from dataclasses import dataclass, field
 
+HIT_RATE_THRESHOLD = 0.60
+MAX_PROPS = 5
+FALLBACK_PROPS = 3
+
 
 @dataclass
 class Pick:
@@ -10,6 +14,7 @@ class Pick:
     reasoning: str
     confidence: str
     props: list[dict] = field(default_factory=list)
+    low_confidence_props: bool = False
 
 
 def analyze_games(games: list[dict], stats: dict, props: dict) -> list[Pick]:
@@ -57,21 +62,27 @@ def _analyze_game(game: dict, stats: dict, game_props: list[dict]) -> Pick:
             f"({home_fg*100:.1f}% FG) de {home['full_name']}."
         )
 
-    top_props = _extract_top_props(game_props)
+    top_props, low_confidence_props = _extract_top_props(game_props)
+    label = f"{visitor['full_name']} @ {home['full_name']}"
+    print(
+        f"[analyzer]   {label}: {len(top_props)} props selected "
+        f"(low_confidence={low_confidence_props})"
+    )
 
     return Pick(
-        game_label=f"{visitor['full_name']} @ {home['full_name']}",
+        game_label=label,
         home_team=home["full_name"],
         visitor_team=visitor["full_name"],
         recommended_bet=recommended_bet,
         reasoning=reasoning,
         confidence=confidence,
         props=top_props,
+        low_confidence_props=low_confidence_props,
     )
 
 
-def _extract_top_props(bookmakers: list[dict]) -> list[dict]:
-    seen = {}
+def _extract_top_props(bookmakers: list[dict]) -> tuple[list[dict], bool]:
+    seen: dict[str, dict] = {}
     for bookmaker in bookmakers:
         for market in bookmaker.get("markets", []):
             key = market.get("key", "")
@@ -79,6 +90,7 @@ def _extract_top_props(bookmakers: list[dict]) -> list[dict]:
                 player = outcome.get("description", "")
                 point = outcome.get("point", "")
                 name = outcome.get("name", "")
+                price = outcome.get("price", 0)
                 prop_key = f"{player}_{key}_{name}"
                 if prop_key not in seen:
                     seen[prop_key] = {
@@ -86,10 +98,30 @@ def _extract_top_props(bookmakers: list[dict]) -> list[dict]:
                         "market": _market_label(key),
                         "line": point,
                         "side": name,
-                        "price": outcome.get("price", ""),
+                        "price": price,
+                        "hit_rate": _implied_prob(price),
                     }
 
-    return list(seen.values())[:5]
+    all_props = sorted(seen.values(), key=lambda x: x["hit_rate"], reverse=True)
+    print(
+        f"[analyzer]   Props pool: {len(all_props)} unique outcomes. "
+        f"Top hit_rates: {[round(p['hit_rate'], 2) for p in all_props[:5]]}"
+    )
+
+    high_conf = [p for p in all_props if p["hit_rate"] >= HIT_RATE_THRESHOLD]
+    if high_conf:
+        return high_conf[:MAX_PROPS], False
+
+    # Fallback: return top 3 even below threshold
+    return all_props[:FALLBACK_PROPS], True
+
+
+def _implied_prob(price) -> float:
+    if not isinstance(price, (int, float)) or price == 0:
+        return 0.5
+    if price < 0:
+        return abs(price) / (abs(price) + 100)
+    return 100 / (price + 100)
 
 
 def _market_label(key: str) -> str:
