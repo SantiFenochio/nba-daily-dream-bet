@@ -101,7 +101,13 @@ def _fetch_event_game_odds(event_id: str, api_key: str) -> dict:
 
 
 def _parse_game_odds(data: dict) -> dict:
-    result = {"spread": 0.0, "total": 0.0, "moneyline_home": 0, "moneyline_visitor": 0}
+    result = {
+        "spread": 0.0,
+        "total": 0.0,
+        "moneyline_home": 0,
+        "moneyline_visitor": 0,
+        "implied_prob_home": None,  # vig-free implied probability for home team
+    }
     bookmakers = data.get("bookmakers", [])
     if not bookmakers:
         return result
@@ -119,7 +125,6 @@ def _parse_game_odds(data: dict) -> dict:
                     result["spread"] = outcome.get("point", 0.0)
                     break
             else:
-                # fallback: first outcome point
                 if outcomes:
                     result["spread"] = outcomes[0].get("point", 0.0)
 
@@ -139,4 +144,31 @@ def _parse_game_odds(data: dict) -> dict:
                 else:
                     result["moneyline_visitor"] = price
 
+            # Compute vig-free implied probability for home team
+            ml_home = result["moneyline_home"]
+            ml_visitor = result["moneyline_visitor"]
+            if ml_home != 0 and ml_visitor != 0:
+                result["implied_prob_home"] = _vig_free_prob(ml_home, ml_visitor)
+
     return result
+
+
+def _american_to_raw_prob(american_odds: int) -> float:
+    """Convert American odds to raw implied probability (includes vig)."""
+    if american_odds > 0:
+        return 100 / (american_odds + 100)
+    else:
+        return abs(american_odds) / (abs(american_odds) + 100)
+
+
+def _vig_free_prob(home_odds: int, visitor_odds: int) -> float:
+    """Return vig-free implied win probability for the home team.
+
+    Removes the bookmaker margin by normalizing both sides so they sum to 1.
+    """
+    raw_home = _american_to_raw_prob(home_odds)
+    raw_visitor = _american_to_raw_prob(visitor_odds)
+    total = raw_home + raw_visitor
+    if total == 0:
+        return 0.5
+    return raw_home / total

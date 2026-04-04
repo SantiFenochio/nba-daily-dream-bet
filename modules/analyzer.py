@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field
+from math import exp
 
 
-HOME_COURT_BONUS = 2.5      # pts advantage for home team (statistically documented)
+HOME_COURT_BONUS = 2.5       # pts advantage for home team (statistically documented)
 BACK_TO_BACK_PENALTY = 0.04  # 4% scoring reduction on back-to-back nights
 
 
@@ -20,6 +21,7 @@ class Pick:
     market_total: float = 0.0
     home_back_to_back: bool = False
     visitor_back_to_back: bool = False
+    model_edge: float = 0.0   # model win prob minus book implied prob (positive = value)
 
 
 def analyze_games(
@@ -59,6 +61,10 @@ def _analyze_game(
     home_fg = home_stats.get("fg_pct", 0) or 0
     visitor_fg = visitor_stats.get("fg_pct", 0) or 0
 
+    # Defensive proxy: blocks + steals as quality signal (available in free tier)
+    home_def = (home_stats.get("blk", 0) or 0) + (home_stats.get("stl", 0) or 0)
+    visitor_def = (visitor_stats.get("blk", 0) or 0) + (visitor_stats.get("stl", 0) or 0)
+
     # Factor: back-to-back fatigue
     home_b2b = rest_info.get(home["id"], {}).get("is_back_to_back", False)
     visitor_b2b = rest_info.get(visitor["id"], {}).get("is_back_to_back", False)
@@ -68,54 +74,50 @@ def _analyze_game(
     home_pts_adj = home_pts * (1 - BACK_TO_BACK_PENALTY if home_b2b else 1)
     visitor_pts_adj = visitor_pts * (1 - BACK_TO_BACK_PENALTY if visitor_b2b else 1)
 
-    # Factor: home court advantage
-    home_score = home_pts_adj * 0.6 + home_fg * 100 * 0.4 + HOME_COURT_BONUS
-    visitor_score = visitor_pts_adj * 0.6 + visitor_fg * 100 * 0.4
+    # Scoring formula: offense (pts + fg%) + defensive proxy + home court
+    # Weights: pts 50%, fg% 30%, defense 20%
+    home_score = home_pts_adj * 0.5 + home_fg * 100 * 0.3 + home_def * 0.5 * 0.2 + HOME_COURT_BONUS
+    visitor_score = visitor_pts_adj * 0.5 + visitor_fg * 100 * 0.3 + visitor_def * 0.5 * 0.2
 
     predicted_margin = home_score - visitor_score
 
-    # Factor: calibrate confidence with market spread
-    market_spread = odds.get("spread", 0.0)  # negative = home is favored
+    # Market data
+    market_spread = odds.get("spread", 0.0)
     market_total = odds.get("total", 0.0)
-    market_agrees = (
-        (predicted_margin > 0 and market_spread <= 0) or
-        (predicted_margin < 0 and market_spread > 0)
-    ) if market_spread != 0 else True
+    implied_prob_home = odds.get("implied_prob_home")  # vig-free, or None if unavailable
 
-    margin = abs(predicted_margin)
-    if margin < 2:
-        confidence = "Baja"
-    elif margin < 5:
-        confidence = "Media"
-    else:
-        confidence = "Alta" if market_agrees else "Media"
+    # Confidence via implied probability edge (preferred) or margin fallback
+    model_edge, confidence = _calculate_confidence(predicted_margin, implied_prob_home, market_spread)
 
     # Winner recommendation
     if predicted_margin >= 0:
         recommended_bet = f"{home['full_name']} gana como local"
         winner_name = home["full_name"]
-        winner_pts, winner_fg = home_pts, home_fg
+        winner_pts, winner_fg, winner_def = home_pts, home_fg, home_def
         loser_name = visitor["full_name"]
-        loser_pts, loser_fg = visitor_pts, visitor_fg
+        loser_pts, loser_fg, loser_def = visitor_pts, visitor_fg, visitor_def
     else:
         recommended_bet = f"{visitor['full_name']} gana como visitante"
         winner_name = visitor["full_name"]
-        winner_pts, winner_fg = visitor_pts, visitor_fg
+        winner_pts, winner_fg, winner_def = visitor_pts, visitor_fg, visitor_def
         loser_name = home["full_name"]
-        loser_pts, loser_fg = home_pts, home_fg
+        loser_pts, loser_fg, loser_def = home_pts, home_fg, home_def
 
     # Build reasoning
+    def_str = f", def. {winner_def:.1f} blk+stl" if winner_def > 0 else ""
     fatigue_parts = []
     if home_b2b:
         fatigue_parts.append(f"{home['full_name']} en B2B")
     if visitor_b2b:
         fatigue_parts.append(f"{visitor['full_name']} en B2B")
     fatigue_str = f" ⚠️ {', '.join(fatigue_parts)}." if fatigue_parts else ""
-
-    rest_str = f" Descanso: local {home_rest}d / visitante {visitor_rest}d." if (home_rest != 3 or visitor_rest != 3) else ""
+    rest_str = (
+        f" Descanso: local {home_rest}d / visitante {visitor_rest}d."
+        if (home_rest != 3 or visitor_rest != 3) else ""
+    )
 
     reasoning = (
-        f"{winner_name} promedia {winner_pts:.1f} pts ({winner_fg*100:.1f}% FG)"
+        f"{winner_name} promedia {winner_pts:.1f} pts ({winner_fg*100:.1f}% FG{def_str})"
         f" vs {loser_pts:.1f} pts ({loser_fg*100:.1f}% FG) de {loser_name}."
         f" Ventaja local aplicada (+{HOME_COURT_BONUS} pts).{fatigue_str}{rest_str}"
     )
@@ -148,7 +150,58 @@ def _analyze_game(
         market_total=market_total,
         home_back_to_back=home_b2b,
         visitor_back_to_back=visitor_b2b,
+        model_edge=model_edge,
     )
+
+
+def _margin_to_probability(margin: float) -> float:
+    """Convert predicted score margin to win probability using logistic sigmoid.
+    Divisor 8.0: ~8-pt advantage ≈ 73% win probability, consistent with NBA research.
+    """
+    return 1 / (1 + exp(-margin / 8.0))
+
+
+def _calculate_confidence(
+    margin: float,
+    implied_prob_home: float | None,
+    market_spread: float,
+) -> tuple[float, str]:
+    """Return (model_edge, confidence_label).
+
+    When moneyline data is available, confidence is based on the edge between
+    the model's win probability and the book's vig-free implied probability.
+    Falls back to margin-based system when market data is missing.
+    """
+    model_prob_home = _margin_to_probability(margin)
+
+    if implied_prob_home is not None:
+        # Edge from the perspective of our predicted winner
+        if margin >= 0:
+            edge = model_prob_home - implied_prob_home
+        else:
+            edge = (1 - model_prob_home) - (1 - implied_prob_home)
+
+        abs_edge = abs(edge)
+        if abs_edge >= 0.08:
+            return abs_edge, "Alta"
+        elif abs_edge >= 0.04:
+            return abs_edge, "Media"
+        else:
+            return abs_edge, "Baja"
+    else:
+        # Fallback: margin-based with market direction check
+        market_agrees = (
+            (margin > 0 and market_spread <= 0) or
+            (margin < 0 and market_spread > 0)
+        ) if market_spread != 0 else True
+
+        abs_margin = abs(margin)
+        if abs_margin < 2:
+            return 0.0, "Baja"
+        elif abs_margin < 5:
+            return 0.0, "Media"
+        else:
+            return 0.0, "Alta" if market_agrees else "Media"
 
 
 def _extract_top_props(bookmakers: list[dict]) -> list[dict]:

@@ -23,11 +23,12 @@ def format_message(picks: list[Pick]) -> str:
 
     for i, pick in enumerate(picks, start=1):
         emoji = CONFIDENCE_EMOJI.get(pick.confidence, "")
+        edge_str = f" (ventaja vs libro: {pick.model_edge*100:.1f}%)" if pick.model_edge > 0 else ""
         lines += [
             f"*Partido {i}:* {pick.game_label}",
             f"📌 *Apuesta:* {pick.recommended_bet}",
             f"📊 *Análisis:* {pick.reasoning}",
-            f"{emoji} *Confianza:* {pick.confidence}",
+            f"{emoji} *Confianza:* {pick.confidence}{edge_str}",
         ]
 
         if pick.market_spread != 0.0:
