@@ -2,7 +2,10 @@ name: Daily NBA Pick
 
 on:
   schedule:
+    # Send 1: 9 AM ET (14:00 UTC) — morning preview, lines open
     - cron: "0 14 * * *"
+    # Send 2: 5 PM ET (22:00 UTC) — injuries confirmed, lines sharp
+    - cron: "0 22 * * *"
   workflow_dispatch:
 
 jobs:
@@ -26,4 +29,5 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_KEY }}
         run: python main.py

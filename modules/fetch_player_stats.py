@@ -1,4 +1,3 @@
-import os
 import time
 import unicodedata
 import requests
@@ -6,6 +5,12 @@ from datetime import date
 
 from nba_api.stats.static import players as nba_players
 from nba_api.stats.endpoints import playergamelogs
+
+try:
+    from bs4 import BeautifulSoup
+    BS4_AVAILABLE = True
+except ImportError:
+    BS4_AVAILABLE = False
 
 # Maps Odds API market keys to nba_api DataFrame column names
 STAT_COL = {
@@ -149,49 +154,81 @@ def parse_minutes(min_val) -> float:
 
 def get_injury_statuses(player_names: list[str]) -> dict[str, str | None]:
     """
-    Check injury status for a list of players via Tank01 RapidAPI.
-    Makes 1 bulk call to get all players, then individual calls only for matched ones.
+    Mejora 13 — Scrape NBA injury report from Rotowire (free, no auth required).
     Returns {player_name: injury_description_or_None}.
+    Falls back gracefully on any error.
     """
     result: dict[str, str | None] = {n: None for n in player_names}
-    api_key = os.getenv("RAPIDAPI_KEY")
-    if not api_key:
+
+    if not BS4_AVAILABLE:
+        print("[player_stats] beautifulsoup4 not installed — skipping injury check")
         return result
 
-    headers = {
-        "X-RapidAPI-Key": api_key,
-        "X-RapidAPI-Host": "tank01-fantasy-stats.p.rapidapi.com",
-    }
-
     try:
-        print("[player_stats] Fetching Tank01 player list...")
+        print("[player_stats] Fetching injury report from Rotowire...")
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
         resp = requests.get(
-            "https://tank01-fantasy-stats.p.rapidapi.com/getNBAPlayerList",
+            "https://www.rotowire.com/basketball/injury-report.php",
             headers=headers,
             timeout=15,
         )
         resp.raise_for_status()
-        tank_players = resp.json().get("body", [])
-        print(f"[player_stats] Tank01: {len(tank_players)} players in list")
 
-        # Build lookup: target_name → tank player_id + injury info (if in list)
-        matched: dict[str, dict] = {}
-        for tp in tank_players:
-            long_name = (tp.get("longName") or "").lower()
-            for target in player_names:
-                if target.lower() in long_name or long_name in target.lower():
-                    matched[target] = tp
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Rotowire injury table: each row has player name + status + description
+        injured: dict[str, str] = {}
+        for row in soup.select("tr.injury-report__row, div.player-injury"):
+            # Try table row format
+            cells = row.select("td")
+            if len(cells) >= 4:
+                raw_name   = cells[0].get_text(strip=True)
+                status_txt = cells[2].get_text(strip=True)
+                desc_txt   = cells[3].get_text(strip=True)
+                if raw_name and status_txt.lower() not in ("active", ""):
+                    label = f"{status_txt} — {desc_txt}" if desc_txt else status_txt
+                    injured[_normalize(raw_name)] = label
+
+        # Fallback: try link-based player names
+        if not injured:
+            for link in soup.select("a.player-injury__name, td.player-injury-report__player a"):
+                raw_name = link.get_text(strip=True)
+                row = link.find_parent("tr") or link.find_parent("div")
+                if row:
+                    status_el = row.select_one(".player-injury__status, td:nth-child(3)")
+                    desc_el   = row.select_one(".player-injury__desc,  td:nth-child(4)")
+                    status_txt = status_el.get_text(strip=True) if status_el else ""
+                    desc_txt   = desc_el.get_text(strip=True)   if desc_el   else ""
+                    if raw_name and status_txt.lower() not in ("active", ""):
+                        label = f"{status_txt} — {desc_txt}" if desc_txt else status_txt
+                        injured[_normalize(raw_name)] = label
+
+        print(f"[player_stats] Rotowire: {len(injured)} injured/questionable players found")
+
+        # Match against our target player list
+        for target in player_names:
+            target_norm = _normalize(target)
+            # Exact match first
+            if target_norm in injured:
+                result[target] = injured[target_norm]
+                print(f"[player_stats] Injury: {target} → {injured[target_norm]}")
+                continue
+            # Partial: all parts of target name in injured name
+            parts = target_norm.split()
+            for inj_name, inj_status in injured.items():
+                if all(p in inj_name for p in parts):
+                    result[target] = inj_status
+                    print(f"[player_stats] Injury (fuzzy): {target} → {inj_status}")
                     break
 
-        for name, tp in matched.items():
-            injury = tp.get("injury") or {}
-            if isinstance(injury, dict) and injury:
-                status = injury.get("injDesc") or injury.get("injStatus") or ""
-                if status and status.lower() not in ("active", "", "healthy"):
-                    result[name] = status
-                    print(f"[player_stats] {name} → {status}")
-
     except Exception as e:
-        print(f"[player_stats] Tank01 error: {e}")
+        print(f"[player_stats] Rotowire injury fetch error: {e}")
 
     return result

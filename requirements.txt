@@ -3,3 +3,5 @@ python-dotenv==1.0.0
 python-telegram-bot==20.7
 aiohttp==3.9.1
 nba_api>=1.4.0
+scipy>=1.11.0
+beautifulsoup4>=4.12.0
