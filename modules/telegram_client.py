@@ -14,5 +14,5 @@ async def send_telegram_message(text: str) -> None:
     await bot.send_message(
         chat_id=chat_id,
         text=text,
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=ParseMode.HTML,
     )
