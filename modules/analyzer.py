@@ -175,19 +175,21 @@ def _calculate_confidence(
     model_prob_home = _margin_to_probability(margin)
 
     if implied_prob_home is not None:
-        # Edge from the perspective of our predicted winner
+        # Edge from the perspective of our predicted winner (positive = we give higher prob than book)
         if margin >= 0:
             edge = model_prob_home - implied_prob_home
         else:
             edge = (1 - model_prob_home) - (1 - implied_prob_home)
 
-        abs_edge = abs(edge)
-        if abs_edge >= 0.08:
-            return abs_edge, "Alta"
-        elif abs_edge >= 0.04:
-            return abs_edge, "Media"
+        if edge >= 0.08:
+            return edge, "Alta"
+        elif edge >= 0.04:
+            return edge, "Media"
+        elif edge >= 0:
+            return edge, "Baja"
         else:
-            return abs_edge, "Baja"
+            # Book is more confident than our model on this outcome → no value, flag as Baja
+            return 0.0, "Baja"
     else:
         # Fallback: margin-based with market direction check
         market_agrees = (
