@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from modules.fetch_games import get_today_games
 from modules.fetch_props import get_player_props, parse_props
 from modules.fetch_player_stats import get_player_logs, get_injury_statuses
+from modules.fetch_context import get_team_context
 from modules.analyzer import analyze_player_props
 from modules.formatter import format_message
 from modules.telegram_client import send_telegram_message
@@ -19,17 +20,19 @@ ET = ZoneInfo("America/New_York")
 
 
 def _get_b2b_team_abbrs(date_str: str) -> set[str]:
-    """Return set of team abbreviations that played yesterday (back-to-back detection)."""
-    yesterday = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    """Return team abbreviations that played yesterday (back-to-back detection)."""
+    yesterday = (
+        datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)
+    ).strftime("%Y-%m-%d")
     yesterday_games = get_today_games(yesterday)
-    b2b = set()
+    b2b: set[str] = set()
     for g in yesterday_games:
         b2b.add(g["home_team"]["abbreviation"])
         b2b.add(g["visitor_team"]["abbreviation"])
     if b2b:
-        print(f"[main] B2B teams today (played yesterday): {', '.join(sorted(b2b))}")
+        print(f"[main] B2B teams: {', '.join(sorted(b2b))}")
     else:
-        print("[main] No back-to-back teams detected.")
+        print("[main] No back-to-back teams today.")
     return b2b
 
 
@@ -38,7 +41,7 @@ async def main():
     print(f"[main] Date (ET): {date_str}")
 
     try:
-        # 1. Today's games
+        # ── 1. Today's games ────────────────────────────────────────────────
         print("[main] Fetching today's NBA games...")
         games = get_today_games(date_str)
         print(f"[main] Games found: {len(games)}")
@@ -48,11 +51,15 @@ async def main():
             await send_telegram_message("Sin partidos NBA hoy 🏀")
             return
 
-        # 2. Back-to-back detection
+        # ── 2. Back-to-back detection ────────────────────────────────────────
         print("[main] Checking back-to-back teams...")
         b2b_team_abbrs = _get_b2b_team_abbrs(date_str)
 
-        # 3. Player props from The Odds API
+        # ── 3. Team context: pace + DEF_RATING (mejoras 5 + 7) ───────────────
+        print("[main] Fetching team context (pace + DEF_RATING)...")
+        team_context = get_team_context()
+
+        # ── 4. Player props from The Odds API ────────────────────────────────
         print("[main] Fetching player props...")
         raw_props = get_player_props(games)
         prop_records = parse_props(raw_props, games)
@@ -62,12 +69,12 @@ async def main():
             await send_telegram_message("No se encontraron props para hoy 🏀")
             return
 
-        # 4. Unique players that have props
+        # ── 5. Unique players with props ─────────────────────────────────────
         unique_players = list({r["player"] for r in prop_records})
         print(f"[main] Unique players with props: {len(unique_players)}")
 
-        # 5. Fetch historical game logs for each player (nba_api)
-        print("[main] Fetching player game logs from nba_api (this may take ~30s)...")
+        # ── 6. Historical game logs via nba_api ──────────────────────────────
+        print("[main] Fetching player game logs (may take ~30s)...")
         player_logs: dict[str, list[dict]] = {}
         for name in unique_players:
             player_logs[name] = get_player_logs(name, last_n=20)
@@ -75,11 +82,11 @@ async def main():
         found = sum(1 for v in player_logs.values() if v)
         print(f"[main] Game logs fetched: {found}/{len(unique_players)} players matched")
 
-        # 6. Injury statuses via Tank01
-        print("[main] Checking injury statuses (Tank01)...")
+        # ── 7. Injury statuses via Rotowire (mejora 13) ──────────────────────
+        print("[main] Checking injury statuses (Rotowire)...")
         injury_statuses = get_injury_statuses(unique_players)
 
-        # 7. Analyze
+        # ── 8. Analyze ───────────────────────────────────────────────────────
         print("[main] Analyzing player props...")
         picks_by_game = analyze_player_props(
             prop_records=prop_records,
@@ -87,16 +94,18 @@ async def main():
             injury_statuses=injury_statuses,
             b2b_team_abbrs=b2b_team_abbrs,
             games=games,
+            team_context=team_context,
         )
 
         if not picks_by_game:
-            print("[main] No picks generated — notifying Telegram.")
+            print("[main] No picks with positive EV — notifying Telegram.")
             await send_telegram_message(
-                "No se pudieron generar picks hoy \\(insuficientes datos históricos\\)\\."
+                "🏀 <b>NBA Daily Dream Bet</b>\n"
+                "Sin picks con EV positivo hoy. El mercado está eficiente."
             )
             return
 
-        # 8. Format and send
+        # ── 9. Format and send ────────────────────────────────────────────────
         print("[main] Formatting and sending message...")
         message = format_message(picks_by_game)
         await send_telegram_message(message)
@@ -105,8 +114,12 @@ async def main():
     except Exception:
         tb = traceback.format_exc()
         print(f"[main] UNHANDLED EXCEPTION:\n{tb}")
-        safe_tb = tb[-600:].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        error_text = f"<b>NBA Bot Error</b>\n<code>{safe_tb}</code>"
+        safe_tb = (
+            tb[-600:]
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
         try:
             await send_telegram_message(
                 f"<b>NBA Bot Error</b>\n<code>{safe_tb}</code>"
