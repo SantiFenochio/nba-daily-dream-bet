@@ -30,6 +30,21 @@ def format_message(picks: list[Pick]) -> str:
             f"{emoji} *Confianza:* {pick.confidence}",
         ]
 
+        if pick.market_spread != 0.0:
+            spread_label = f"{pick.market_spread:+.1f} (local)"
+            lines.append(f"📉 *Spread mercado:* {spread_label}")
+
+        if pick.totals_bet:
+            lines.append(f"🔢 *Totales:* {pick.totals_bet} — _{pick.totals_reasoning}_")
+
+        if pick.home_back_to_back or pick.visitor_back_to_back:
+            b2b_parts = []
+            if pick.home_back_to_back:
+                b2b_parts.append("🏠 Local en B2B")
+            if pick.visitor_back_to_back:
+                b2b_parts.append("✈️ Visitante en B2B")
+            lines.append(f"⚠️ *Alerta fatiga:* {' | '.join(b2b_parts)}")
+
         if pick.props:
             lines.append("🎯 *Props destacados:*")
             for prop in pick.props:
