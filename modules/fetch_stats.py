@@ -1,7 +1,8 @@
+import os
 import requests
 
 
-NBA_API_BASE = "https://www.balldontlie.io/api/v1"
+NBA_API_BASE = "https://api.balldontlie.io/v1"
 
 
 def get_team_stats(games: list[dict]) -> dict:
@@ -25,9 +26,13 @@ def get_team_stats(games: list[dict]) -> dict:
 def _fetch_season_averages(team_id: int) -> dict:
     url = f"{NBA_API_BASE}/season_averages"
     params = {"team_ids[]": team_id, "season": _current_season()}
+    headers = {}
+    api_key = os.getenv("BALLDONTLIE_API_KEY")
+    if api_key:
+        headers["Authorization"] = api_key
 
     try:
-        response = requests.get(url, params=params, timeout=10)
+        response = requests.get(url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
         averages = data.get("data", [])

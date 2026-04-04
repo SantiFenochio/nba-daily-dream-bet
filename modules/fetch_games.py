@@ -2,7 +2,7 @@ import os
 import requests
 
 
-NBA_API_BASE = "https://www.balldontlie.io/api/v1"
+NBA_API_BASE = "https://api.balldontlie.io/v1"
 
 
 def get_today_games(date_str: str) -> list[dict]:
