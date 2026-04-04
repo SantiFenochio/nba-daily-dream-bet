@@ -5,6 +5,15 @@ from math import exp
 HOME_COURT_BONUS = 2.5       # pts advantage for home team (statistically documented)
 BACK_TO_BACK_PENALTY = 0.04  # 4% scoring reduction on back-to-back nights
 
+# Recent form vs season average blend (research: 20-game window optimal, 60/40 split)
+RECENT_WEIGHT = 0.60
+SEASON_WEIGHT = 0.40
+
+# H2H modifier cap: max ±2 pts regardless of historical dominance
+H2H_MAX_MODIFIER = 2.0
+# Minimum H2H games needed to apply a modifier
+H2H_MIN_GAMES = 3
+
 
 @dataclass
 class Pick:
@@ -21,7 +30,14 @@ class Pick:
     market_total: float = 0.0
     home_back_to_back: bool = False
     visitor_back_to_back: bool = False
-    model_edge: float = 0.0   # model win prob minus book implied prob (positive = value)
+    model_edge: float = 0.0
+    # New fields
+    home_recent_win_pct: float = 0.0
+    visitor_recent_win_pct: float = 0.0
+    home_streak: int = 0
+    visitor_streak: int = 0
+    h2h_games: int = 0
+    h2h_summary: str = ""
 
 
 def analyze_games(
@@ -30,6 +46,8 @@ def analyze_games(
     props: dict,
     game_odds: dict,
     rest_info: dict,
+    recent_form: dict | None = None,
+    h2h: dict | None = None,
 ) -> list[Pick]:
     picks = []
     for game in games:
@@ -39,6 +57,9 @@ def analyze_games(
             props.get(game["id"], []),
             game_odds.get(game["id"], {}),
             rest_info,
+            (recent_form or {}).get(game["home_team"]["id"], {}),
+            (recent_form or {}).get(game["visitor_team"]["id"], {}),
+            (h2h or {}).get(game["id"], {}),
         )
         picks.append(pick)
     return picks
@@ -50,22 +71,62 @@ def _analyze_game(
     game_props: list[dict],
     odds: dict,
     rest_info: dict,
+    home_form: dict,
+    visitor_form: dict,
+    h2h_data: dict,
 ) -> Pick:
     home = game["home_team"]
     visitor = game["visitor_team"]
     home_stats = stats.get(home["id"], {})
     visitor_stats = stats.get(visitor["id"], {})
 
-    home_pts = home_stats.get("pts", 0) or 0
-    visitor_pts = visitor_stats.get("pts", 0) or 0
-    home_fg = home_stats.get("fg_pct", 0) or 0
-    visitor_fg = visitor_stats.get("fg_pct", 0) or 0
+    # --- Season averages ---
+    home_pts_season = home_stats.get("pts", 0) or 0
+    visitor_pts_season = visitor_stats.get("pts", 0) or 0
+    home_fg_season = home_stats.get("fg_pct", 0) or 0
+    visitor_fg_season = visitor_stats.get("fg_pct", 0) or 0
+    home_def_season = (home_stats.get("blk", 0) or 0) + (home_stats.get("stl", 0) or 0)
+    visitor_def_season = (visitor_stats.get("blk", 0) or 0) + (visitor_stats.get("stl", 0) or 0)
 
-    # Defensive proxy: blocks + steals as quality signal (available in free tier)
-    home_def = (home_stats.get("blk", 0) or 0) + (home_stats.get("stl", 0) or 0)
-    visitor_def = (visitor_stats.get("blk", 0) or 0) + (visitor_stats.get("stl", 0) or 0)
+    # --- Recent form (last ~15-20 games) ---
+    home_pts_recent = home_form.get("recent_pts", 0)
+    visitor_pts_recent = visitor_form.get("recent_pts", 0)
+    home_allowed_recent = home_form.get("recent_pts_allowed", 0)
+    visitor_allowed_recent = visitor_form.get("recent_pts_allowed", 0)
+    home_win_pct = home_form.get("recent_win_pct", 0.5)
+    visitor_win_pct = visitor_form.get("recent_win_pct", 0.5)
+    home_streak = home_form.get("streak", 0)
+    visitor_streak = visitor_form.get("streak", 0)
+    home_form_games = home_form.get("games_count", 0)
+    visitor_form_games = visitor_form.get("games_count", 0)
 
-    # Factor: back-to-back fatigue
+    # Blend recent form with season (only when we have enough recent data)
+    if home_form_games >= 5:
+        home_pts = home_pts_recent * RECENT_WEIGHT + home_pts_season * SEASON_WEIGHT
+    else:
+        home_pts = home_pts_season
+
+    if visitor_form_games >= 5:
+        visitor_pts = visitor_pts_recent * RECENT_WEIGHT + visitor_pts_season * SEASON_WEIGHT
+    else:
+        visitor_pts = visitor_pts_season
+
+    # FG% from season (recent form doesn't track fg%)
+    home_fg = home_fg_season
+    visitor_fg = visitor_fg_season
+
+    # Defense: use recent pts_allowed as defensive proxy when available
+    if home_form_games >= 5:
+        home_def = (home_pts_season - home_allowed_recent) * RECENT_WEIGHT + home_def_season * SEASON_WEIGHT
+    else:
+        home_def = home_def_season
+
+    if visitor_form_games >= 5:
+        visitor_def = (visitor_pts_season - visitor_allowed_recent) * RECENT_WEIGHT + visitor_def_season * SEASON_WEIGHT
+    else:
+        visitor_def = visitor_def_season
+
+    # --- Back-to-back fatigue ---
     home_b2b = rest_info.get(home["id"], {}).get("is_back_to_back", False)
     visitor_b2b = rest_info.get(visitor["id"], {}).get("is_back_to_back", False)
     home_rest = rest_info.get(home["id"], {}).get("rest_days", 3)
@@ -74,55 +135,72 @@ def _analyze_game(
     home_pts_adj = home_pts * (1 - BACK_TO_BACK_PENALTY if home_b2b else 1)
     visitor_pts_adj = visitor_pts * (1 - BACK_TO_BACK_PENALTY if visitor_b2b else 1)
 
-    # Scoring formula: offense (pts + fg%) + defensive proxy + home court
-    # Weights: pts 50%, fg% 30%, defense 20%
-    home_score = home_pts_adj * 0.5 + home_fg * 100 * 0.3 + home_def * 0.5 * 0.2 + HOME_COURT_BONUS
-    visitor_score = visitor_pts_adj * 0.5 + visitor_fg * 100 * 0.3 + visitor_def * 0.5 * 0.2
+    # --- Scoring formula: offense + defense proxy + home court ---
+    home_score = home_pts_adj * 0.5 + home_fg * 100 * 0.3 + max(home_def, 0) * 0.5 * 0.2 + HOME_COURT_BONUS
+    visitor_score = visitor_pts_adj * 0.5 + visitor_fg * 100 * 0.3 + max(visitor_def, 0) * 0.5 * 0.2
 
-    predicted_margin = home_score - visitor_score
+    # --- H2H modifier (small, capped, requires minimum sample) ---
+    h2h_modifier = 0.0
+    h2h_games = h2h_data.get("h2h_games", 0)
+    h2h_summary = ""
+    if h2h_games >= H2H_MIN_GAMES:
+        avg_margin = h2h_data.get("avg_margin_home", 0.0)
+        # Scale: 5-pt historical margin → ~1 pt modifier; cap at H2H_MAX_MODIFIER
+        raw_modifier = avg_margin * 0.2
+        h2h_modifier = max(-H2H_MAX_MODIFIER, min(H2H_MAX_MODIFIER, raw_modifier))
+        home_h2h_wins = h2h_data.get("home_wins", 0)
+        visitor_h2h_wins = h2h_data.get("visitor_wins", 0)
+        h2h_summary = (
+            f"{home['full_name']} {home_h2h_wins}-{visitor_h2h_wins} en H2H "
+            f"(últ. {h2h_games} partidos, margen prom. {avg_margin:+.1f})"
+        )
 
-    # Market data
+    predicted_margin = (home_score + h2h_modifier) - visitor_score
+
+    # --- Market data ---
     market_spread = odds.get("spread", 0.0)
     market_total = odds.get("total", 0.0)
-    implied_prob_home = odds.get("implied_prob_home")  # vig-free, or None if unavailable
+    implied_prob_home = odds.get("implied_prob_home")
 
-    # Confidence via implied probability edge (preferred) or margin fallback
+    # --- Confidence ---
     model_edge, confidence = _calculate_confidence(predicted_margin, implied_prob_home, market_spread)
 
-    # Winner recommendation
+    # --- Winner recommendation ---
     if predicted_margin >= 0:
         recommended_bet = f"{home['full_name']} gana como local"
-        winner_name = home["full_name"]
-        winner_pts, winner_fg, winner_def = home_pts, home_fg, home_def
-        loser_name = visitor["full_name"]
-        loser_pts, loser_fg, loser_def = visitor_pts, visitor_fg, visitor_def
+        winner_name, loser_name = home["full_name"], visitor["full_name"]
+        winner_pts, winner_fg = home_pts, home_fg
+        loser_pts, loser_fg = visitor_pts, visitor_fg
     else:
         recommended_bet = f"{visitor['full_name']} gana como visitante"
-        winner_name = visitor["full_name"]
-        winner_pts, winner_fg, winner_def = visitor_pts, visitor_fg, visitor_def
-        loser_name = home["full_name"]
-        loser_pts, loser_fg, loser_def = home_pts, home_fg, home_def
+        winner_name, loser_name = visitor["full_name"], home["full_name"]
+        winner_pts, winner_fg = visitor_pts, visitor_fg
+        loser_pts, loser_fg = home_pts, home_fg
 
-    # Build reasoning
-    def_str = f", def. {winner_def:.1f} blk+stl" if winner_def > 0 else ""
+    # --- Reasoning ---
+    form_tag = ""
+    if home_form_games >= 5 or visitor_form_games >= 5:
+        form_tag = f" (blend últ. {max(home_form_games, visitor_form_games)} partidos)"
+
     fatigue_parts = []
     if home_b2b:
         fatigue_parts.append(f"{home['full_name']} en B2B")
     if visitor_b2b:
         fatigue_parts.append(f"{visitor['full_name']} en B2B")
     fatigue_str = f" ⚠️ {', '.join(fatigue_parts)}." if fatigue_parts else ""
+
     rest_str = (
         f" Descanso: local {home_rest}d / visitante {visitor_rest}d."
         if (home_rest != 3 or visitor_rest != 3) else ""
     )
 
     reasoning = (
-        f"{winner_name} promedia {winner_pts:.1f} pts ({winner_fg*100:.1f}% FG{def_str})"
-        f" vs {loser_pts:.1f} pts ({loser_fg*100:.1f}% FG) de {loser_name}."
-        f" Ventaja local aplicada (+{HOME_COURT_BONUS} pts).{fatigue_str}{rest_str}"
+        f"{winner_name} promedia {winner_pts:.1f} pts ({winner_fg*100:.1f}% FG)"
+        f" vs {loser_pts:.1f} pts ({loser_fg*100:.1f}% FG) de {loser_name}{form_tag}."
+        f" Ventaja local (+{HOME_COURT_BONUS} pts).{fatigue_str}{rest_str}"
     )
 
-    # Totals recommendation based on back-to-back research
+    # --- Totals recommendation ---
     totals_bet = ""
     totals_reasoning = ""
     if market_total > 0:
@@ -151,6 +229,12 @@ def _analyze_game(
         home_back_to_back=home_b2b,
         visitor_back_to_back=visitor_b2b,
         model_edge=model_edge,
+        home_recent_win_pct=home_win_pct,
+        visitor_recent_win_pct=visitor_win_pct,
+        home_streak=home_streak,
+        visitor_streak=visitor_streak,
+        h2h_games=h2h_games,
+        h2h_summary=h2h_summary,
     )
 
 
@@ -175,7 +259,6 @@ def _calculate_confidence(
     model_prob_home = _margin_to_probability(margin)
 
     if implied_prob_home is not None:
-        # Edge from the perspective of our predicted winner (positive = we give higher prob than book)
         if margin >= 0:
             edge = model_prob_home - implied_prob_home
         else:
@@ -188,10 +271,8 @@ def _calculate_confidence(
         elif edge >= 0:
             return edge, "Baja"
         else:
-            # Book is more confident than our model on this outcome → no value, flag as Baja
             return 0.0, "Baja"
     else:
-        # Fallback: margin-based with market direction check
         market_agrees = (
             (margin > 0 and market_spread <= 0) or
             (margin < 0 and market_spread > 0)
