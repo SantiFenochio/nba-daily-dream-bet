@@ -23,8 +23,8 @@ from modules.fetch_props import MARKET_LABELS
 # ── Tunable constants ────────────────────────────────────────────────────────
 MIN_MINUTES_THRESHOLD = 18.0   # Filter garbage-time / low-usage players
 MIN_GAMES_REQUIRED    = 5      # Minimum game log sample to analyze
-MAX_PICKS_PER_GAME    = 6      # Top N picks per game (user wants more picks)
-MAX_TOTAL_PICKS       = 20     # Hard cap across all games to avoid huge messages
+MAX_PICKS_PER_GAME    = 6      # Top N picks per game
+MAX_TOTAL_PICKS       = 20     # Hard cap across all games
 OPP_HISTORY_WEIGHT    = 0.10   # Weight of opponent-specific historical adj
 LOCATION_WEIGHT       = 0.15   # Weight of home/away split adjustment
 B2B_PENALTY           = 0.93   # Performance multiplier on back-to-back nights
@@ -32,7 +32,14 @@ LAPLACE_PRIOR         = 0.50   # Bayesian prior (50/50 neutral)
 LAPLACE_WEIGHT        = 4      # Equivalent prior observations
 MIN_EV_THRESHOLD      = 2.0    # Minimum EV% to include a pick
 QUARTER_KELLY         = 0.25   # Fraction of full Kelly to stake
-# League averages — used as fallback when team_context is empty
+# Blowout risk — if the spread exceeds this, the favored team's stars risk
+# sitting the 4th quarter early, suppressing their counting stats.
+BLOWOUT_SPREAD_THRESHOLD = 12.0   # Points — spread from favored team perspective
+BLOWOUT_FAVORITE_PENALTY = 0.91   # 9% reduction for blowout-risk games (SGA effect)
+# Teammate absence boost — if a key teammate is out, remaining players get
+# more usage and possessions (Flagg/LeBron effect when Doncic+Reaves sat).
+ABSENCE_BOOST_PER_PLAYER = 0.10   # 10% per confirmed-Out teammate (capped at 2)
+# League averages — fallback when team_context is empty
 _DEFAULT_LEAGUE_AVG_PACE       = 99.5
 _DEFAULT_LEAGUE_AVG_DEF_RATING = 113.5
 # ────────────────────────────────────────────────────────────────────────────
@@ -72,6 +79,8 @@ class PlayerPick:
     injury_status: str | None = None
     pace_factor: float = 1.0
     dvp_factor: float = 1.0
+    blowout_risk: bool = False       # Favored team by 12+ pts — star may sit 4th
+    absence_boost: float = 1.0      # Multiplier from absent teammates
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -85,19 +94,22 @@ def analyze_player_props(
     b2b_team_abbrs: set[str],
     games: list[dict],
     team_context: dict | None = None,
+    game_lines: dict | None = None,          # {game_id: {spread, total, home_is_favorite}}
+    team_absent_players: dict | None = None,  # {team_abbr: {player_name, ...}}
 ) -> dict[str, list["PlayerPick"]]:
     """
     Returns {game_label: [PlayerPick, ...]} sorted by EV, capped at MAX_PICKS_PER_GAME.
     """
     game_by_id = {g["id"]: g for g in games}
-    tc = team_context or {}
+    tc  = team_context or {}
+    gl  = game_lines or {}
+    tap = team_absent_players or {}
 
-    # BUG FIX 4: compute real league averages from team_context instead of hardcoded values
     league_avg_pace, league_avg_def = _calculate_league_averages(tc)
 
     picks_by_game: dict[str, list[PlayerPick]] = {}
 
-    # Group outcomes by (player, market_key, game_id) — analyse Over & Under together
+    # Group outcomes by (player, market_key, game_id)
     grouped: dict[tuple, list[dict]] = {}
     for rec in prop_records:
         key = (rec["player"], rec["market_key"], rec["game_id"])
@@ -110,21 +122,42 @@ def analyze_player_props(
             continue
 
         player_team_abbr = logs[0].get("TEAM_ABBREVIATION", "") if logs else ""
-        is_home = player_team_abbr == game["home_team"]["abbreviation"]
+        is_home  = player_team_abbr == game["home_team"]["abbreviation"]
         opp_abbr = (
             game["visitor_team"]["abbreviation"] if is_home
             else game["home_team"]["abbreviation"]
         )
-        is_b2b = player_team_abbr in b2b_team_abbrs
+        is_b2b     = player_team_abbr in b2b_team_abbrs
         game_label = f"{game['visitor_team']['full_name']} @ {game['home_team']['full_name']}"
 
         pace_factor, dvp_factor = _get_context_factors(
             player_team_abbr, opp_abbr, tc, league_avg_pace, league_avg_def
         )
 
+        # ── Blowout risk (April 5 lesson: SGA scored 20 in a 35-pt blowout) ──
+        lines       = gl.get(game_id, {})
+        spread      = lines.get("spread")          # home-perspective, negative = home favored
+        game_total  = lines.get("total")
+        home_fav    = lines.get("home_is_favorite")
+
+        blowout_risk = False
+        if spread is not None:
+            # Is THIS player's team the heavy favorite?
+            player_is_home    = is_home
+            player_team_favored = (
+                (player_is_home and home_fav) or
+                (not player_is_home and not home_fav)
+            )
+            if player_team_favored and abs(spread) >= BLOWOUT_SPREAD_THRESHOLD:
+                blowout_risk = True
+
+        # ── Teammate absence boost (April 5: Flagg 45 pts, LeBron 15 ast) ──
+        absent_teammates = tap.get(player_team_abbr, set()) - {player}
+        n_absent         = min(len(absent_teammates), 2)   # cap at 2 players
+        absence_boost    = 1.0 + ABSENCE_BOOST_PER_PLAYER * n_absent
+
         best_pick = None
         for rec in outcomes:
-            # BUG FIX 2: pass opposite_price for proper two-sided devig
             pick = _analyze_one_prop(
                 player=player,
                 market_key=market_key,
@@ -140,6 +173,10 @@ def analyze_player_props(
                 injury_status=injury_statuses.get(player),
                 pace_factor=pace_factor,
                 dvp_factor=dvp_factor,
+                blowout_risk=blowout_risk,
+                absence_boost=absence_boost,
+                absent_teammates=absent_teammates,
+                game_total=game_total,
             )
             if pick is None:
                 continue
@@ -192,6 +229,10 @@ def _analyze_one_prop(
     injury_status: str | None,
     pace_factor: float,
     dvp_factor: float,
+    blowout_risk: bool = False,
+    absence_boost: float = 1.0,
+    absent_teammates: set | None = None,
+    game_total: float | None = None,
 ) -> "PlayerPick | None":
 
     # ── Minutes filter ────────────────────────────────────────────────────
@@ -260,6 +301,8 @@ def _analyze_one_prop(
         * (B2B_PENALTY if is_b2b else 1.0)
         * pace_factor
         * dvp_factor
+        * (BLOWOUT_FAVORITE_PENALTY if blowout_risk else 1.0)   # blowout: star sits early
+        * absence_boost                                           # teammate out: more usage
         + loc_adj
         + opp_adj
     )
@@ -333,6 +376,8 @@ def _analyze_one_prop(
         away_vals=away_vals,
         pace_factor=pace_factor,
         dvp_factor=dvp_factor,
+        blowout_risk=blowout_risk,
+        absent_teammates=absent_teammates or set(),
     )
 
     detail = (
@@ -373,6 +418,8 @@ def _analyze_one_prop(
         injury_status=injury_status,
         pace_factor=pace_factor,
         dvp_factor=dvp_factor,
+        blowout_risk=blowout_risk,
+        absence_boost=absence_boost,
     )
 
 
@@ -506,6 +553,8 @@ def _build_headline(
     is_b2b, opp_vals, opp_avg, opp_abbr,
     is_home, home_vals, away_vals,
     pace_factor, dvp_factor,
+    blowout_risk: bool = False,
+    absent_teammates: set | None = None,
 ) -> str:
     n10 = min(10, len(values))
     parts = []
@@ -549,15 +598,25 @@ def _build_headline(
     elif dvp_factor <= 0.97:
         parts.append(f"Defensa rival sólida — DvP: {(dvp_factor-1)*100:.1f}%")
 
-    # 7. B2B
+    # 7. Teammate absence boost
+    if absent_teammates:
+        names = ", ".join(sorted(absent_teammates))
+        pct = min(len(absent_teammates), 2) * int(ABSENCE_BOOST_PER_PLAYER * 100)
+        parts.append(f"Compañero(s) ausente(s): {names} — uso esperado +{pct}%")
+
+    # 8. Blowout risk warning
+    if blowout_risk:
+        parts.append(f"Alerta paliza: favorito por 12+ pts — posible reduccion de minutos en 4to cuarto")
+
+    # 9. B2B
     if is_b2b:
         parts.append("Back-to-back — rendimiento suele bajar ~7%")
 
-    # 8. Opponent history
+    # 10. Opponent history
     if opp_avg is not None and len(opp_vals) >= 2:
         parts.append(f"Vs {opp_abbr}: promedia {opp_avg:.1f} en {len(opp_vals)} partido(s)")
 
-    # 9. Location split
+    # 11. Location split
     loc_vals = home_vals if is_home else away_vals
     loc_label = "local" if is_home else "visitante"
     if len(loc_vals) >= 3:

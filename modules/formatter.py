@@ -104,6 +104,15 @@ def _format_pick(pick: PlayerPick) -> list[str]:
     if context_flags:
         lines.append(f"  🧮 Contexto: {', '.join(context_flags)}")
 
+    # Blowout risk warning
+    if pick.blowout_risk:
+        lines.append("  ⚡ <b>Riesgo paliza:</b> favorito 12+ pts — podría salir en el 4to")
+
+    # Teammate absence boost
+    if pick.absence_boost > 1.0:
+        pct = round((pick.absence_boost - 1.0) * 100)
+        lines.append(f"  📈 Compañero ausente — uso proyectado +{pct}%")
+
     # Injury warning
     if pick.injury_status:
         lines.append(f"  🚨 <b>Lesión:</b> {_h(pick.injury_status)}")

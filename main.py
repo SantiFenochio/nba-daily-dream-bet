@@ -40,21 +40,47 @@ def _get_b2b_team_abbrs(date_str: str) -> set[str]:
 def _build_game_times(games: list[dict]) -> dict[str, str]:
     """
     Build {game_label: hora_argentina} for upcoming games.
-    BallDontLie returns status as ISO UTC timestamp for unstarted games
-    (e.g. "2026-04-06T01:00:00Z") and a string like "Final" / "3rd Qtr" otherwise.
+    BallDontLie returns status as ISO UTC for unstarted games.
     """
     result: dict[str, str] = {}
     for g in games:
-        label = f"{g['visitor_team']['full_name']} @ {g['home_team']['full_name']}"
+        label  = f"{g['visitor_team']['full_name']} @ {g['home_team']['full_name']}"
         status = g.get("status", "")
         if status and "T" in status and "Z" in status:
             try:
                 dt_utc = datetime.fromisoformat(status.replace("Z", "+00:00"))
-                dt_ar = dt_utc.astimezone(AR)
+                dt_ar  = dt_utc.astimezone(AR)
                 result[label] = dt_ar.strftime("%H:%M hs (ARG)")
             except Exception:
-                pass  # leave no entry — formatter will skip it
+                pass
     return result
+
+
+def _build_team_absent_players(
+    injury_statuses: dict[str, str | None],
+    player_logs: dict[str, list[dict]],
+) -> dict[str, set[str]]:
+    """
+    Returns {team_abbr: {player_name, ...}} for players confirmed OUT today.
+    Used by the analyzer to apply a teammate-absence usage boost.
+    Only players listed as "Out" (not Questionable/Day-To-Day) are included,
+    to avoid over-boosting for players who end up playing.
+    """
+    absent: dict[str, set[str]] = {}
+    for player, status in injury_statuses.items():
+        if not status:
+            continue
+        # Only confirmed-out players trigger the cascade
+        if "out" not in status.lower():
+            continue
+        logs = player_logs.get(player, [])
+        if not logs:
+            continue
+        team_abbr = logs[0].get("TEAM_ABBREVIATION", "")
+        if team_abbr:
+            absent.setdefault(team_abbr, set()).add(player)
+            print(f"[main] Absent teammate cascade: {player} ({team_abbr}) is OUT")
+    return absent
 
 
 async def main():
@@ -80,9 +106,9 @@ async def main():
         print("[main] Fetching team context (pace + DEF_RATING)...")
         team_context = get_team_context()
 
-        # ── 4. Player props from The Odds API ────────────────────────────────
-        print("[main] Fetching player props...")
-        raw_props = get_player_props(games)
+        # ── 4. Player props + game lines (spread/total) ───────────────────────
+        print("[main] Fetching player props and game lines...")
+        raw_props, game_lines = get_player_props(games)
         prop_records = parse_props(raw_props, games)
 
         if not prop_records:
@@ -107,7 +133,10 @@ async def main():
         print("[main] Checking injury statuses (ESPN)...")
         injury_statuses = get_injury_statuses(unique_players)
 
-        # ── 8. Analyze ───────────────────────────────────────────────────────
+        # ── 8. Absent teammate cascade (for usage boost) ──────────────────────
+        team_absent_players = _build_team_absent_players(injury_statuses, player_logs)
+
+        # ── 9. Analyze ───────────────────────────────────────────────────────
         print("[main] Analyzing player props...")
         picks_by_game = analyze_player_props(
             prop_records=prop_records,
@@ -116,6 +145,8 @@ async def main():
             b2b_team_abbrs=b2b_team_abbrs,
             games=games,
             team_context=team_context,
+            game_lines=game_lines,
+            team_absent_players=team_absent_players,
         )
 
         if not picks_by_game:
@@ -126,10 +157,10 @@ async def main():
             )
             return
 
-        # ── 9. Game start times in Argentina timezone ─────────────────────────
+        # ── 10. Game start times in Argentina timezone ────────────────────────
         game_times = _build_game_times(games)
 
-        # ── 10. Format and send ───────────────────────────────────────────────
+        # ── 11. Format and send ───────────────────────────────────────────────
         print("[main] Formatting and sending message...")
         message = format_message(picks_by_game, game_times=game_times)
         await send_telegram_message(message)
