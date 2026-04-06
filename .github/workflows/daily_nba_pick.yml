@@ -2,10 +2,8 @@ name: Daily NBA Pick
 
 on:
   schedule:
-    # Send 1: 9 AM ET (14:00 UTC) — morning preview, lines open
-    - cron: "0 14 * * *"
-    # Send 2: 5 PM ET (22:00 UTC) — injuries confirmed, lines sharp
-    - cron: "0 22 * * *"
+    # 14:00 hs Argentina (UTC-3) = 17:00 UTC — único envío diario
+    - cron: "0 17 * * *"
   workflow_dispatch:
 
 jobs:
