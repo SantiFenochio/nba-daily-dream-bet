@@ -158,6 +158,10 @@ def _format_pick_detail(pick: PlayerPick) -> list[str]:
         pct = round((pick.absence_boost - 1.0) * 100)
         lines.append(f"  📈 Compañero ausente — uso proyectado +{pct}%")
 
+    # Rotation risk (irregular minutes)
+    if pick.rotation_risk:
+        lines.append(f"  🔄 <b>Rotación irregular:</b> varianza ±{pick.min_std:.0f} min (−7% proy.)")
+
     # Foul trouble
     if pick.foul_risk:
         foul_parts = [f"{pick.avg_fouls:.1f} PF/j (prom. L10)"]

@@ -18,6 +18,7 @@ Improvements retained:
   - Mejora NEW: Hot/cold form detection (L5 vs L10 performance delta)
 """
 
+import statistics
 from dataclasses import dataclass
 from datetime import date, datetime
 from scipy.stats import poisson as poisson_dist
@@ -26,7 +27,7 @@ from modules.fetch_player_stats import get_stat_value, parse_minutes
 from modules.fetch_props import MARKET_LABELS
 
 # ── Tunable constants ────────────────────────────────────────────────────────
-MIN_MINUTES_THRESHOLD = 18.0   # Filter garbage-time / low-usage players
+MIN_MINUTES_THRESHOLD = 20.0   # Filter low-usage players (raised from 18 → 20)
 MIN_GAMES_REQUIRED    = 5      # Minimum game log sample to analyze
 MAX_PICKS_PER_GAME    = 6      # Top N picks per game
 MAX_TOTAL_PICKS       = 20     # Hard cap across all games
@@ -35,8 +36,48 @@ LOCATION_WEIGHT       = 0.15   # Weight of home/away split adjustment
 B2B_PENALTY           = 0.93   # Performance multiplier on back-to-back nights
 LAPLACE_PRIOR         = 0.50   # Bayesian prior (50/50 neutral)
 LAPLACE_WEIGHT        = 4      # Equivalent prior observations
-MIN_EV_THRESHOLD      = 2.0    # Minimum EV% to include a pick
+MIN_EV_THRESHOLD      = 2.0    # Default minimum EV% (overridden per market below)
 QUARTER_KELLY         = 0.25   # Fraction of full Kelly to stake
+# ── EV mínimo por tipo de mercado (mejora 1) ──────────────────────────────────
+# Stats impredecibles (steals, blocks, threes) necesitan mayor ventaja esperada
+# para compensar su alta varianza inherente. PRA es más suave por ser combinado.
+MIN_EV_BY_MARKET: dict[str, float] = {
+    "player_points":                    3.0,   # Puntos: umbral medio
+    "player_rebounds":                  3.0,   # Rebotes: umbral medio
+    "player_assists":                   3.0,   # Asistencias: umbral medio
+    "player_points_rebounds_assists":   2.0,   # PRA: más flexible (combo suaviza varianza)
+    "player_threes":                    5.0,   # Triples: volátil, necesita más borde
+    "player_steals":                    6.0,   # Robos: muy aleatorio, umbral alto
+    "player_blocks":                    6.0,   # Tapas: muy aleatorio, umbral alto
+    "player_turnovers":                 5.0,   # Pérdidas: inconsistente
+}
+# ── Coeficiente de variación máximo por mercado (mejora 2) ────────────────────
+# Si el jugador varía demasiado, la línea es poco confiable. CV = stdev / mean.
+# Steals/blocks tienen CV alto por naturaleza → umbral más permisivo.
+MAX_CV_BY_MARKET: dict[str, float] = {
+    "player_points":                    0.45,  # 45% CV máx para puntos
+    "player_rebounds":                  0.50,  # 50% CV máx para rebotes
+    "player_assists":                   0.55,  # 55% CV máx para asistencias
+    "player_points_rebounds_assists":   0.40,  # 40% CV máx para PRA (más estable)
+    "player_threes":                    0.80,  # 80% CV máx para triples
+    "player_steals":                    0.90,  # 90% CV máx para robos
+    "player_blocks":                    0.90,  # 90% CV máx para tapas
+    "player_turnovers":                 0.70,  # 70% CV máx para pérdidas
+}
+# ── Riesgo de rotación — minutos muy irregulares (mejora 3) ───────────────────
+ROTATION_RISK_STD     = 7.0    # std dev minutos L10 > 7 = jugador rotacional
+ROTATION_RISK_PENALTY = 0.93   # −7% proyección para jugadores de rotación irregular
+# ── DVP por stat — mapea mercado a la columna de oponente (mejora 4) ──────────
+# Usa cuántos pts/reb/ast/3s PERMITE el rival por partido en vez del DEF_RATING genérico.
+MARKET_TO_OPP_STAT: dict[str, str] = {
+    "player_points":                    "opp_pts",
+    "player_rebounds":                  "opp_reb",
+    "player_assists":                   "opp_ast",
+    "player_threes":                    "opp_fg3m",
+    "player_turnovers":                 "opp_tov",
+    "player_points_rebounds_assists":   "opp_pts",   # pts como proxy de PRA
+    # steals y blocks → fallback a DEF_RATING (posición específica no disponible)
+}
 # Blowout risk — if the spread exceeds this, the favored team's stars risk
 # sitting the 4th quarter early, suppressing their counting stats.
 BLOWOUT_SPREAD_THRESHOLD = 12.0   # Points — spread from favored team perspective
@@ -116,6 +157,10 @@ class PlayerPick:
     minutes_trend_pct: float = 0.0  # % change avg minutes L5 vs L10 (>0 = expanding role)
     is_hot: bool = False            # L5 avg > L10 avg by FORM_HOT_THRESHOLD
     is_cold: bool = False           # L5 avg < L10 avg by FORM_COLD_THRESHOLD
+    high_variance: bool = False     # Player's CV exceeds market threshold — inconsistent
+    cv_score: float = 0.0           # Coefficient of variation (stdev/mean) L10
+    rotation_risk: bool = False     # Minutes std dev > ROTATION_RISK_STD — rotational player
+    min_std: float = 0.0            # Std dev of minutes in L10
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -143,7 +188,7 @@ def analyze_player_props(
     tap = team_absent_players or {}
 
     today_str = date.today().strftime("%Y-%m-%d")
-    league_avg_pace, league_avg_def = _calculate_league_averages(tc)
+    league_avg_pace, league_avg_def, league_avg_opp = _calculate_league_averages(tc)
 
     picks_by_game: dict[str, list[PlayerPick]] = {}
 
@@ -169,7 +214,8 @@ def analyze_player_props(
         game_label = f"{game['visitor_team']['full_name']} @ {game['home_team']['full_name']}"
 
         pace_factor, dvp_factor = _get_context_factors(
-            player_team_abbr, opp_abbr, tc, league_avg_pace, league_avg_def
+            player_team_abbr, opp_abbr, market_key, tc,
+            league_avg_pace, league_avg_def, league_avg_opp,
         )
 
         # ── Blowout risk (April 5 lesson: SGA scored 20 in a 35-pt blowout) ──
@@ -280,12 +326,23 @@ def _analyze_one_prop(
     min_ev_threshold: float = MIN_EV_THRESHOLD,
 ) -> "PlayerPick | None":
 
-    # ── Minutes filter ────────────────────────────────────────────────────
+    # ── Minutes filter (mejora 3) ─────────────────────────────────────────
+    # Requires average ≥ 20 min in L10 — ensures meaningful playing time.
     min_vals = [parse_minutes(g.get("MIN", 0)) for g in logs[:10]]
     if min_vals and (sum(min_vals) / len(min_vals)) < MIN_MINUTES_THRESHOLD:
         return None
 
     avg_minutes_l10 = (sum(min_vals) / len(min_vals)) if min_vals else 30.0
+
+    # ── Rotation risk — irregular minutes (mejora 3) ──────────────────────
+    # Players with highly variable minutes are riskier: some nights they
+    # barely play. Detect via std dev of minutes in L10.
+    if len(min_vals) >= 3:
+        min_std       = statistics.stdev(min_vals)
+        rotation_risk = min_std > ROTATION_RISK_STD
+    else:
+        min_std       = 0.0
+        rotation_risk = False
 
     # ── Foul trouble analysis (PF column from nba_api) ────────────────────
     # Uses last 20 games to detect chronic foul issues.
@@ -324,6 +381,22 @@ def _analyze_one_prop(
         return None
 
     n = len(values)
+
+    # ── Variance filter — coeficiente de variación (mejora 2) ─────────────
+    # CV = stdev / mean. A high CV means the player is too unpredictable for
+    # this stat (e.g., scores 30 one night and 8 the next). Each market has
+    # its own tolerance since steals/blocks are inherently more volatile.
+    slice_cv = values[:min(10, n)]
+    mean_cv  = sum(slice_cv) / len(slice_cv)
+    if mean_cv > 0 and len(slice_cv) >= 3:
+        cv_score     = statistics.stdev(slice_cv) / mean_cv
+        max_cv       = MAX_CV_BY_MARKET.get(market_key, 0.60)
+        high_variance = cv_score > max_cv
+        if high_variance:
+            return None   # too inconsistent — skip this pick
+    else:
+        cv_score      = 0.0
+        high_variance = False
 
     # ── Averages (display only) ───────────────────────────────────────────
     avg_l5  = sum(values[:5])          / min(5, n)
@@ -420,6 +493,7 @@ def _analyze_one_prop(
         * (BLOWOUT_FAVORITE_PENALTY if blowout_risk else 1.0)   # blowout: star sits early
         * absence_boost                                           # teammate out: more usage
         * (FOUL_TROUBLE_PENALTY if foul_risk else 1.0)           # foul-prone: minutes risk
+        * (ROTATION_RISK_PENALTY if rotation_risk else 1.0)      # irregular minutes risk
         * minutes_trend_multiplier                                # role expanding/contracting
         * form_multiplier                                         # hot/cold streak adjustment
         + loc_adj
@@ -446,7 +520,10 @@ def _analyze_one_prop(
 
     ev_pct = _expected_value_pct(model_prob, price)
 
-    if ev_pct < min_ev_threshold:
+    # Use market-specific EV threshold (mejora 1) unless caller overrides (fallback mode)
+    effective_ev_threshold = min_ev_threshold if min_ev_threshold != MIN_EV_THRESHOLD else \
+        MIN_EV_BY_MARKET.get(market_key, MIN_EV_THRESHOLD)
+    if ev_pct < effective_ev_threshold:
         return None
 
     kelly_pct = _quarter_kelly(model_prob, price)
@@ -505,6 +582,8 @@ def _analyze_one_prop(
         minutes_trend_pct=minutes_trend_pct,
         is_hot=is_hot,
         is_cold=is_cold,
+        rotation_risk=rotation_risk,
+        min_std=min_std,
     )
 
     foul_detail = ""  # built below, appended to detail string
@@ -565,6 +644,10 @@ def _analyze_one_prop(
         minutes_trend_pct=round(minutes_trend_pct * 100, 1),  # store as %
         is_hot=is_hot,
         is_cold=is_cold,
+        high_variance=high_variance,
+        cv_score=round(cv_score, 2),
+        rotation_risk=rotation_risk,
+        min_std=round(min_std, 1),
     )
 
 
@@ -695,14 +778,14 @@ def _quarter_kelly(model_prob: float, american_odds: int) -> float:
 # Context factors — Pace + DEF_RATING
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _calculate_league_averages(team_context: dict) -> tuple[float, float]:
+def _calculate_league_averages(team_context: dict) -> tuple[float, float, dict]:
     """
-    BUG FIX 4: Calculate actual league-average pace and DEF_RATING from
-    the real team data instead of hardcoded constants.
+    Calculates league-average pace, DEF_RATING, and per-stat opponent averages
+    from real team data. Returns (avg_pace, avg_def, league_avg_opp_stats).
     Falls back to defaults if team_context is empty.
     """
     if not team_context:
-        return _DEFAULT_LEAGUE_AVG_PACE, _DEFAULT_LEAGUE_AVG_DEF_RATING
+        return _DEFAULT_LEAGUE_AVG_PACE, _DEFAULT_LEAGUE_AVG_DEF_RATING, {}
 
     paces = [v["pace"] for v in team_context.values() if v.get("pace")]
     def_ratings = [v["def_rating"] for v in team_context.values() if v.get("def_rating")]
@@ -710,25 +793,67 @@ def _calculate_league_averages(team_context: dict) -> tuple[float, float]:
     avg_pace = sum(paces) / len(paces) if paces else _DEFAULT_LEAGUE_AVG_PACE
     avg_def  = sum(def_ratings) / len(def_ratings) if def_ratings else _DEFAULT_LEAGUE_AVG_DEF_RATING
 
+    # Compute league-average opponent stats for DVP normalization
+    league_avg_opp: dict[str, float] = {}
+    for stat_key in ("opp_pts", "opp_reb", "opp_ast", "opp_fg3m", "opp_stl", "opp_blk", "opp_tov"):
+        vals = [v[stat_key] for v in team_context.values() if stat_key in v]
+        if vals:
+            league_avg_opp[stat_key] = sum(vals) / len(vals)
+
     print(f"[analyzer] Dynamic league averages: pace={avg_pace:.1f}, DEF_RATING={avg_def:.1f}")
-    return avg_pace, avg_def
+    if league_avg_opp:
+        print(f"[analyzer] League avg opp: pts={league_avg_opp.get('opp_pts', 0):.1f}, "
+              f"reb={league_avg_opp.get('opp_reb', 0):.1f}, "
+              f"ast={league_avg_opp.get('opp_ast', 0):.1f}, "
+              f"3pm={league_avg_opp.get('opp_fg3m', 0):.1f}")
+    return avg_pace, avg_def, league_avg_opp
+
+
+def _get_stat_dvp_factor(
+    market_key: str,
+    opp_abbr: str,
+    team_context: dict,
+    league_avg_opp: dict,
+    league_avg_def: float,
+) -> float:
+    """
+    Returns a DVP multiplier specific to the stat market being analyzed.
+
+    For scoring/rebounding/assists/threes: uses how many of that stat the
+    opponent ALLOWS per game vs league average.
+      > 1.0 = opponent allows more than avg → good for the player
+      < 1.0 = opponent allows less than avg → bad for the player
+
+    Falls back to DEF_RATING-based factor when no stat-specific data available.
+    """
+    stat_key = MARKET_TO_OPP_STAT.get(market_key)
+    if stat_key:
+        opp_stat    = team_context.get(opp_abbr, {}).get(stat_key)
+        league_stat = league_avg_opp.get(stat_key)
+        if opp_stat and league_stat and league_stat > 0:
+            return round(opp_stat / league_stat, 4)
+
+    # Fallback: generic DEF_RATING factor (higher DEF_RATING = worse defense = good for player)
+    opp_def_rating = team_context.get(opp_abbr, {}).get("def_rating", league_avg_def)
+    return round(league_avg_def / opp_def_rating, 4) if opp_def_rating > 0 else 1.0
 
 
 def _get_context_factors(
     player_team: str,
     opp_abbr: str,
+    market_key: str,
     team_context: dict,
     league_avg_pace: float,
     league_avg_def: float,
+    league_avg_opp: dict,
 ) -> tuple[float, float]:
-    """Returns (pace_factor, dvp_factor) for a player's matchup."""
+    """Returns (pace_factor, dvp_factor) for a player's matchup and specific market."""
     player_pace = team_context.get(player_team, {}).get("pace", league_avg_pace)
     opp_pace    = team_context.get(opp_abbr, {}).get("pace", league_avg_pace)
     game_pace   = (player_pace + opp_pace) / 2.0
     pace_factor = round(game_pace / league_avg_pace, 4) if league_avg_pace > 0 else 1.0
 
-    opp_def_rating = team_context.get(opp_abbr, {}).get("def_rating", league_avg_def)
-    dvp_factor = round(league_avg_def / opp_def_rating, 4) if opp_def_rating > 0 else 1.0
+    dvp_factor = _get_stat_dvp_factor(market_key, opp_abbr, team_context, league_avg_opp, league_avg_def)
 
     return pace_factor, dvp_factor
 
@@ -754,6 +879,8 @@ def _build_headline(
     minutes_trend_pct: float = 0.0,
     is_hot: bool = False,
     is_cold: bool = False,
+    rotation_risk: bool = False,
+    min_std: float = 0.0,
 ) -> str:
     n10 = min(10, len(values))
     parts = []
@@ -835,7 +962,11 @@ def _build_headline(
     elif not is_b2b and rest_days >= REST_RUST_DAYS:
         parts.append(f"Posible oxido: {rest_days} dias sin jugar")
 
-    # 13. B2B
+    # 13. Rotation risk
+    if rotation_risk:
+        parts.append(f"Rotacion irregular: varianza minutos ±{min_std:.0f} min — riesgo de banca")
+
+    # 14. B2B
     if is_b2b:
         parts.append("Back-to-back — rendimiento suele bajar ~7%")
 
