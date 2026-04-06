@@ -12,9 +12,14 @@ Improvements retained:
   - Mejora 10:  Poisson distribution
   - Mejora 14:  Bayesian Laplace smoothing
   - Mejoras 5+7: Pace + DEF_RATING context factors
+  - Mejora NEW: Exponential decay weighting (recent games weighted more)
+  - Mejora NEW: Rest days factor (fresh legs vs rust)
+  - Mejora NEW: Minutes trend detection (expanding/contracting role)
+  - Mejora NEW: Hot/cold form detection (L5 vs L10 performance delta)
 """
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from scipy.stats import poisson as poisson_dist
 
 from modules.fetch_player_stats import get_stat_value, parse_minutes
@@ -49,6 +54,21 @@ FOUL_TROUBLE_PENALTY     = 0.95   # 5% projection penalty for foul-prone players
 # League averages — fallback when team_context is empty
 _DEFAULT_LEAGUE_AVG_PACE       = 99.5
 _DEFAULT_LEAGUE_AVG_DEF_RATING = 113.5
+# Exponential decay weighting — recent games count more
+# game 1 (last) = 1.00, game 2 = 0.85, game 5 = 0.52, game 10 = 0.23, game 20 = 0.04
+DECAY_FACTOR           = 0.85
+# Rest days — performance varies with recovery time
+REST_FRESH_DAYS        = 4      # 4+ days between games → well-rested boost
+REST_FRESH_BOOST       = 1.025  # +2.5% boost after 4+ days rest
+REST_RUST_DAYS         = 7      # 7+ days → possible rust penalty
+REST_RUST_PENALTY      = 0.990  # −1% after extended break
+# Minutes trend — detects role expansion/contraction over last 5 vs last 10 games
+MINUTES_TREND_THRESHOLD = 0.10  # 10% change = meaningful role shift
+MINUTES_TREND_WEIGHT    = 0.40  # how much of the trend translates to the projection
+# Hot/cold form — L5 vs L10 average comparison
+FORM_HOT_THRESHOLD      = 0.12  # L5 > L10 by 12%+ → hot streak
+FORM_COLD_THRESHOLD     = 0.12  # L5 < L10 by 12%+ → cold streak
+FORM_WEIGHT             = 0.30  # fraction of the form delta applied to projection
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -92,6 +112,10 @@ class PlayerPick:
     avg_fouls: float = 0.0          # Average personal fouls per game (L10)
     foul_out_count: int = 0         # Foul-outs (6 PF) in last 20 games
     foul_trouble_count: int = 0     # Games sat early due to foul trouble (L20)
+    rest_days: int = 2              # Days since last game (1=B2B, 4+=fresh)
+    minutes_trend_pct: float = 0.0  # % change avg minutes L5 vs L10 (>0 = expanding role)
+    is_hot: bool = False            # L5 avg > L10 avg by FORM_HOT_THRESHOLD
+    is_cold: bool = False           # L5 avg < L10 avg by FORM_COLD_THRESHOLD
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -116,6 +140,7 @@ def analyze_player_props(
     gl  = game_lines or {}
     tap = team_absent_players or {}
 
+    today_str = date.today().strftime("%Y-%m-%d")
     league_avg_pace, league_avg_def = _calculate_league_averages(tc)
 
     picks_by_game: dict[str, list[PlayerPick]] = {}
@@ -167,6 +192,9 @@ def analyze_player_props(
         n_absent         = min(len(absent_teammates), 2)   # cap at 2 players
         absence_boost    = 1.0 + ABSENCE_BOOST_PER_PLAYER * n_absent
 
+        # ── Rest days ─────────────────────────────────────────────────────────
+        rest_days = _compute_rest_days(logs, today_str)
+
         best_pick = None
         for rec in outcomes:
             pick = _analyze_one_prop(
@@ -188,6 +216,7 @@ def analyze_player_props(
                 absence_boost=absence_boost,
                 absent_teammates=absent_teammates,
                 game_total=game_total,
+                rest_days=rest_days,
             )
             if pick is None:
                 continue
@@ -244,6 +273,7 @@ def _analyze_one_prop(
     absence_boost: float = 1.0,
     absent_teammates: set | None = None,
     game_total: float | None = None,
+    rest_days: int = 2,
 ) -> "PlayerPick | None":
 
     # ── Minutes filter ────────────────────────────────────────────────────
@@ -291,13 +321,55 @@ def _analyze_one_prop(
 
     n = len(values)
 
-    # ── Averages ──────────────────────────────────────────────────────────
+    # ── Averages (display only) ───────────────────────────────────────────
     avg_l5  = sum(values[:5])          / min(5, n)
     avg_l10 = sum(values[:min(10, n)]) / min(10, n)
     avg_l20 = sum(values[:min(20, n)]) / min(20, n)
 
-    # Recency-weighted base projection
-    base_projection = 0.40 * avg_l5 + 0.35 * avg_l10 + 0.25 * avg_l20
+    # ── Exponential decay projection (NEW) ───────────────────────────────
+    # Each prior game is discounted by DECAY_FACTOR^i so the most recent
+    # game has the highest influence. This is mathematically superior to
+    # simple L5/L10/L20 bucket averages.
+    # game 1=1.00, game 2=0.85, game 5=0.52, game 10=0.23, game 20=0.04
+    base_projection = _weighted_avg(values[:20], DECAY_FACTOR)
+
+    # ── Minutes trend — role expansion/contraction (NEW) ─────────────────
+    # Compare average minutes in last 5 vs last 10 games.
+    # If role is expanding, stats follow; if contracting, project lower.
+    avg_min_l5  = sum(min_vals[:5]) / min(5, len(min_vals)) if min_vals else avg_minutes_l10
+    minutes_trend_pct = (
+        (avg_min_l5 - avg_minutes_l10) / avg_minutes_l10
+        if avg_minutes_l10 > 0 else 0.0
+    )
+    # Cap the trend effect: ±20% minutes change max applies
+    minutes_trend_pct = max(-0.20, min(0.20, minutes_trend_pct))
+    # Only act on meaningful shifts (≥ MINUTES_TREND_THRESHOLD)
+    if abs(minutes_trend_pct) >= MINUTES_TREND_THRESHOLD:
+        minutes_trend_multiplier = 1.0 + minutes_trend_pct * MINUTES_TREND_WEIGHT
+    else:
+        minutes_trend_multiplier = 1.0
+
+    # ── Hot / cold form detection (NEW) ──────────────────────────────────
+    # Compares L5 to L10 baseline. If the player is on a hot or cold run,
+    # nudge the projection in that direction (partially, not fully).
+    form_multiplier = 1.0
+    is_hot = is_cold = False
+    if avg_l10 > 0:
+        form_ratio = avg_l5 / avg_l10
+        if form_ratio >= (1.0 + FORM_HOT_THRESHOLD):
+            # Hot streak: L5 is significantly above L10
+            form_multiplier = 1.0 + (form_ratio - 1.0) * FORM_WEIGHT
+            form_multiplier = min(form_multiplier, 1.15)   # cap at +15%
+            is_hot = True
+        elif form_ratio <= (1.0 - FORM_COLD_THRESHOLD):
+            # Cold streak: L5 is significantly below L10
+            form_multiplier = 1.0 + (form_ratio - 1.0) * FORM_WEIGHT
+            form_multiplier = max(form_multiplier, 0.90)   # floor at −10%
+            is_cold = True
+
+    # ── Rest days factor (NEW) ────────────────────────────────────────────
+    # B2B is already penalized separately. Here we boost for fresh legs.
+    rest_factor = _rest_days_factor(rest_days, is_b2b)
 
     # ── Hit rates ─────────────────────────────────────────────────────────
     side_lower = side.lower()
@@ -338,11 +410,14 @@ def _analyze_one_prop(
     adj_projection = (
         base_projection
         * (B2B_PENALTY if is_b2b else 1.0)
+        * rest_factor                                             # fresh legs / rust
         * pace_factor
         * dvp_factor
         * (BLOWOUT_FAVORITE_PENALTY if blowout_risk else 1.0)   # blowout: star sits early
         * absence_boost                                           # teammate out: more usage
         * (FOUL_TROUBLE_PENALTY if foul_risk else 1.0)           # foul-prone: minutes risk
+        * minutes_trend_multiplier                                # role expanding/contracting
+        * form_multiplier                                         # hot/cold streak adjustment
         + loc_adj
         + opp_adj
     )
@@ -422,6 +497,10 @@ def _analyze_one_prop(
         avg_fouls=avg_fouls,
         foul_out_count=foul_out_count,
         foul_trouble_count=foul_trouble_count,
+        rest_days=rest_days,
+        minutes_trend_pct=minutes_trend_pct,
+        is_hot=is_hot,
+        is_cold=is_cold,
     )
 
     foul_detail = ""  # built below, appended to detail string
@@ -478,12 +557,62 @@ def _analyze_one_prop(
         avg_fouls=round(avg_fouls, 1),
         foul_out_count=foul_out_count,
         foul_trouble_count=foul_trouble_count,
+        rest_days=rest_days,
+        minutes_trend_pct=round(minutes_trend_pct * 100, 1),  # store as %
+        is_hot=is_hot,
+        is_cold=is_cold,
     )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Probability / EV helpers
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _weighted_avg(values: list[float], decay: float = 0.85) -> float:
+    """
+    Exponentially weighted average with newest-first ordering.
+    game 1 (most recent) has weight decay^0=1.0, game 2 has decay^1, etc.
+    This gives the most recent game the highest influence automatically.
+    """
+    if not values:
+        return 0.0
+    weights = [decay ** i for i in range(len(values))]
+    total_w = sum(weights)
+    return sum(v * w for v, w in zip(values, weights)) / total_w
+
+
+def _compute_rest_days(logs: list[dict], today_str: str) -> int:
+    """
+    Compute days between player's last game and today.
+    Returns 1 for B2B, 2 for standard 1-day rest, 4 for well-rested, etc.
+    """
+    if not logs:
+        return 2
+    raw = logs[0].get("GAME_DATE", "")
+    if not raw:
+        return 2
+    try:
+        last_date = datetime.strptime(str(raw)[:10], "%Y-%m-%d").date()
+        today = datetime.strptime(today_str, "%Y-%m-%d").date()
+        delta = (today - last_date).days
+        return max(1, delta)
+    except Exception:
+        return 2
+
+
+def _rest_days_factor(rest_days: int, is_b2b: bool) -> float:
+    """
+    Performance multiplier based on recovery time.
+    B2B already penalized separately — this covers the upside of extra rest.
+    """
+    if is_b2b or rest_days <= 1:
+        return 1.0   # B2B_PENALTY already applied
+    if rest_days >= REST_RUST_DAYS:
+        return REST_RUST_PENALTY    # long layoff → possible rust
+    if rest_days >= REST_FRESH_DAYS:
+        return REST_FRESH_BOOST     # well-rested → boost
+    return 1.0   # 2–3 days = standard rest, no adjustment
+
 
 def _poisson_prob(lambda_rate: float, line: float, side: str) -> float:
     """Poisson CDF probability for count stats."""
@@ -617,6 +746,10 @@ def _build_headline(
     avg_fouls: float = 0.0,
     foul_out_count: int = 0,
     foul_trouble_count: int = 0,
+    rest_days: int = 2,
+    minutes_trend_pct: float = 0.0,
+    is_hot: bool = False,
+    is_cold: bool = False,
 ) -> str:
     n10 = min(10, len(values))
     parts = []
@@ -679,7 +812,26 @@ def _build_headline(
             foul_parts.append(f"salio temprano por faltas en {foul_trouble_count} partidos")
         parts.append(" — ".join(foul_parts))
 
-    # 9. B2B
+    # 10. Hot / cold form
+    if is_hot:
+        parts.append(f"EN RACHA: L5 ({avg_l5:.1f}) supera L10 ({avg_l10:.1f}) por +{((avg_l5/avg_l10-1)*100):.0f}%")
+    elif is_cold:
+        parts.append(f"FRIO: L5 ({avg_l5:.1f}) bajo su L10 ({avg_l10:.1f}) un {((1-avg_l5/avg_l10)*100):.0f}%")
+
+    # 11. Minutes trend
+    if abs(minutes_trend_pct) >= MINUTES_TREND_THRESHOLD * 100:
+        if minutes_trend_pct > 0:
+            parts.append(f"Rol en expansion: +{minutes_trend_pct:.0f}% minutos L5 vs L10")
+        else:
+            parts.append(f"Rol en reduccion: {minutes_trend_pct:.0f}% minutos L5 vs L10")
+
+    # 12. Rest days
+    if not is_b2b and rest_days >= REST_FRESH_DAYS:
+        parts.append(f"Descansado: {rest_days} dias de descanso (+{(REST_FRESH_BOOST-1)*100:.1f}% proyectado)")
+    elif not is_b2b and rest_days >= REST_RUST_DAYS:
+        parts.append(f"Posible oxido: {rest_days} dias sin jugar")
+
+    # 13. B2B
     if is_b2b:
         parts.append("Back-to-back — rendimiento suele bajar ~7%")
 

@@ -113,6 +113,31 @@ def _format_pick(pick: PlayerPick) -> list[str]:
         pct = round((pick.absence_boost - 1.0) * 100)
         lines.append(f"  📈 Compañero ausente — uso proyectado +{pct}%")
 
+    # Hot / cold form
+    if pick.is_hot:
+        lines.append(
+            f"  🔥 <b>En racha:</b> L5 {pick.avg_l5:.1f} vs L10 {pick.avg_l10:.1f}"
+            f" (+{((pick.avg_l5/pick.avg_l10-1)*100):.0f}% sobre su media)"
+        )
+    elif pick.is_cold:
+        lines.append(
+            f"  🥶 <b>Racha fría:</b> L5 {pick.avg_l5:.1f} vs L10 {pick.avg_l10:.1f}"
+            f" (−{((1-pick.avg_l5/pick.avg_l10)*100):.0f}% bajo su media)"
+        )
+
+    # Minutes trend
+    if abs(pick.minutes_trend_pct) >= 10.0:
+        if pick.minutes_trend_pct > 0:
+            lines.append(f"  📈 Rol en expansión: +{pick.minutes_trend_pct:.0f}% minutos (L5 vs L10)")
+        else:
+            lines.append(f"  📉 Rol en reducción: {pick.minutes_trend_pct:.0f}% minutos (L5 vs L10)")
+
+    # Rest days
+    if not pick.is_b2b and pick.rest_days >= 4:
+        lines.append(f"  😴 Descansado: {pick.rest_days} días de descanso (+2.5% proy.)")
+    elif not pick.is_b2b and pick.rest_days >= 7:
+        lines.append(f"  🦺 {pick.rest_days} días sin jugar — posible óxido")
+
     # Foul trouble warning
     if pick.foul_risk:
         foul_parts = [f"{pick.avg_fouls:.1f} PF/j (prom. L10)"]
