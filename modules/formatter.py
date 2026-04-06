@@ -18,62 +18,76 @@ def format_message(
     game_times: dict[str, str] | None = None,
 ) -> str:
     today = datetime.now(ET).strftime("%d/%m/%Y")
-    lines = [
+    gt = game_times or {}
+
+    if not picks_by_game:
+        return f"🏀 <b>NBA DAILY DREAM BET — {today}</b>\n\nNo hay picks disponibles hoy."
+
+    total_picks = sum(len(v) for v in picks_by_game.values())
+
+    # ── SECCIÓN 1: Resumen compacto ──────────────────────────────────────────
+    summary_lines = [
         f"🏀 <b>NBA DAILY DREAM BET — {today}</b>",
-        "─" * 32,
+        f"<i>{total_picks} picks con EV positivo en {len(picks_by_game)} partido(s)</i>",
         "",
     ]
 
-    if not picks_by_game:
-        lines.append("No hay picks disponibles hoy.")
-        return "\n".join(lines)
-
-    total_picks = sum(len(v) for v in picks_by_game.values())
-    lines.append(f"<i>{total_picks} picks con EV positivo en {len(picks_by_game)} partido(s)</i>")
-    lines.append("")
-
-    gt = game_times or {}
-
     for game_label, picks in picks_by_game.items():
         hora = gt.get(game_label)
-        game_header = f"<b>{_h(game_label)}</b>"
+        display_label = game_label.replace(" @ ", " vs ")
+        header = f"<b>{_h(display_label)}</b>"
         if hora:
-            game_header += f"  <i>🕐 {hora}</i>"
-        lines.append(game_header)
-        lines.append("─" * 28)
+            header += f"  🕐 {hora}"
+        summary_lines.append(header)
+        summary_lines.append("─" * 28)
 
         for pick in picks:
-            lines += _format_pick(pick)
-            lines.append("")
+            emoji = CONFIDENCE_EMOJI.get(pick.confidence, "")
+            side_upper = pick.side.upper()
+            summary_lines.append(
+                f"{emoji} <b>{_h(pick.player)}</b> — {_h(pick.market)} {side_upper} {pick.line}"
+            )
 
-        lines.append("")
+        summary_lines.append("")
 
-    lines.append(
+    # ── SECCIÓN 2: Análisis detallado ────────────────────────────────────────
+    detail_lines = [
+        "━" * 30,
+        "📋 <b>ANÁLISIS DETALLADO</b>",
+        "━" * 30,
+        "",
+    ]
+
+    for game_label, picks in picks_by_game.items():
+        for pick in picks:
+            detail_lines += _format_pick_detail(pick)
+            detail_lines.append("")
+
+    detail_lines.append(
         "<i>EV calculado via devig. Probabilidad: Poisson + Bayes. "
         "Apostá con responsabilidad.</i>"
     )
-    return "\n".join(lines)
+
+    return "\n".join(summary_lines) + "\n" + "\n".join(detail_lines)
 
 
-def _format_pick(pick: PlayerPick) -> list[str]:
+def _format_pick_detail(pick: PlayerPick) -> list[str]:
+    """Full analysis block for a single pick — shown in the detail section."""
     emoji = CONFIDENCE_EMOJI.get(pick.confidence, "")
-    price_str = f" ({pick.price:+d})" if pick.price else ""
     side_upper = pick.side.upper()
+    price_str = f" ({pick.price:+d})" if pick.price else ""
 
     lines = [
         f"{emoji} <b>{_h(pick.player)} — {_h(pick.market)} {side_upper} {pick.line}</b>{price_str}",
     ]
 
-    # Natural language headline (split on pipe)
-    for sentence in pick.headline.split(" | "):
-        sentence = sentence.strip()
-        if sentence:
-            lines.append(f"  {_h(sentence)}")
+    # Stats line
+    lines.append(
+        f"  <code>L5: {pick.avg_l5:.1f} | L10: {pick.avg_l10:.1f} | L20: {pick.avg_l20:.1f}"
+        f" | Hit L10: {pick.hit_count_l10}/{pick.games_l10} ({pick.hit_count_l10/pick.games_l10*100:.0f}%)</code>"
+    )
 
-    # Stats detail in monospace
-    lines.append(f"  <code>{pick.detail}</code>")
-
-    # EV + probability row
+    # EV + probability
     ev_bar = _ev_bar(pick.ev_pct)
     lines.append(
         f"  📊 <b>EV: +{pick.ev_pct:.1f}%</b> {ev_bar} | "
@@ -81,45 +95,23 @@ def _format_pick(pick: PlayerPick) -> list[str]:
         f"Mercado justo: {pick.fair_prob*100:.0f}%"
     )
 
-    # Kelly stake suggestion
-    if pick.kelly_pct > 0:
-        lines.append(f"  💰 Kelly 1/4: <b>{pick.kelly_pct:.2f}% del bankroll</b>")
+    # Projection
+    sign = "+" if pick.edge >= 0 else ""
+    lines.append(f"  🎯 Proyección: <b>{pick.projection}</b> ({sign}{pick.edge} vs línea {pick.line})")
 
-    # Streak badge
+    # Streak
     if pick.consecutive_streak >= 3:
         lines.append(
             f"  🔁 Racha: {pick.consecutive_streak} partidos consecutivos {pick.side}"
         )
 
-    # Context factor flags
-    context_flags = []
-    if pick.pace_factor >= 1.03:
-        context_flags.append(f"ritmo elevado (+{(pick.pace_factor-1)*100:.1f}%)")
-    elif pick.pace_factor <= 0.97:
-        context_flags.append(f"ritmo lento ({(pick.pace_factor-1)*100:.1f}%)")
-    if pick.dvp_factor >= 1.04:
-        context_flags.append(f"defensa rival débil (+{(pick.dvp_factor-1)*100:.1f}%)")
-    elif pick.dvp_factor <= 0.97:
-        context_flags.append(f"defensa rival sólida ({(pick.dvp_factor-1)*100:.1f}%)")
-    if context_flags:
-        lines.append(f"  🧮 Contexto: {', '.join(context_flags)}")
-
-    # Blowout risk warning
-    if pick.blowout_risk:
-        lines.append("  ⚡ <b>Riesgo paliza:</b> favorito 12+ pts — podría salir en el 4to")
-
-    # Teammate absence boost
-    if pick.absence_boost > 1.0:
-        pct = round((pick.absence_boost - 1.0) * 100)
-        lines.append(f"  📈 Compañero ausente — uso proyectado +{pct}%")
-
     # Hot / cold form
-    if pick.is_hot:
+    if pick.is_hot and pick.avg_l10 > 0:
         lines.append(
             f"  🔥 <b>En racha:</b> L5 {pick.avg_l5:.1f} vs L10 {pick.avg_l10:.1f}"
             f" (+{((pick.avg_l5/pick.avg_l10-1)*100):.0f}% sobre su media)"
         )
-    elif pick.is_cold:
+    elif pick.is_cold and pick.avg_l10 > 0:
         lines.append(
             f"  🥶 <b>Racha fría:</b> L5 {pick.avg_l5:.1f} vs L10 {pick.avg_l10:.1f}"
             f" (−{((1-pick.avg_l5/pick.avg_l10)*100):.0f}% bajo su media)"
@@ -133,12 +125,34 @@ def _format_pick(pick: PlayerPick) -> list[str]:
             lines.append(f"  📉 Rol en reducción: {pick.minutes_trend_pct:.0f}% minutos (L5 vs L10)")
 
     # Rest days
-    if not pick.is_b2b and pick.rest_days >= 4:
-        lines.append(f"  😴 Descansado: {pick.rest_days} días de descanso (+2.5% proy.)")
-    elif not pick.is_b2b and pick.rest_days >= 7:
+    if not pick.is_b2b and pick.rest_days >= 7:
         lines.append(f"  🦺 {pick.rest_days} días sin jugar — posible óxido")
+    elif not pick.is_b2b and pick.rest_days >= 4:
+        lines.append(f"  😴 Descansado: {pick.rest_days} días de descanso (+2.5% proy.)")
 
-    # Foul trouble warning
+    # Context flags
+    context_flags = []
+    if pick.pace_factor >= 1.03:
+        context_flags.append(f"ritmo elevado (+{(pick.pace_factor-1)*100:.1f}%)")
+    elif pick.pace_factor <= 0.97:
+        context_flags.append(f"ritmo lento ({(pick.pace_factor-1)*100:.1f}%)")
+    if pick.dvp_factor >= 1.04:
+        context_flags.append(f"defensa rival débil (+{(pick.dvp_factor-1)*100:.1f}%)")
+    elif pick.dvp_factor <= 0.97:
+        context_flags.append(f"defensa rival sólida ({(pick.dvp_factor-1)*100:.1f}%)")
+    if context_flags:
+        lines.append(f"  🧮 Contexto: {', '.join(context_flags)}")
+
+    # Blowout risk
+    if pick.blowout_risk:
+        lines.append("  ⚡ <b>Riesgo paliza:</b> favorito 12+ pts — podría salir en el 4to")
+
+    # Teammate absence
+    if pick.absence_boost > 1.0:
+        pct = round((pick.absence_boost - 1.0) * 100)
+        lines.append(f"  📈 Compañero ausente — uso proyectado +{pct}%")
+
+    # Foul trouble
     if pick.foul_risk:
         foul_parts = [f"{pick.avg_fouls:.1f} PF/j (prom. L10)"]
         if pick.foul_out_count >= 2:
@@ -147,20 +161,21 @@ def _format_pick(pick: PlayerPick) -> list[str]:
             foul_parts.append(f"salió temprano por faltas {pick.foul_trouble_count}x")
         lines.append(f"  🟡 <b>Riesgo faltas:</b> {' | '.join(foul_parts)}")
 
-    # Injury warning
+    # Injury
     if pick.injury_status:
         lines.append(f"  🚨 <b>Lesión:</b> {_h(pick.injury_status)}")
 
-    # B2B warning
+    # B2B
     if pick.is_b2b:
         lines.append("  ⚠️ Back-to-back hoy (−7% proyectado)")
 
-    lines.append(f"  {emoji} <b>Confianza: {pick.confidence}</b>")
+    # Confidence
+    lines.append(f"  {emoji} Confianza: <b>{pick.confidence}</b>")
+
     return lines
 
 
 def _ev_bar(ev_pct: float) -> str:
-    """Mini visual bar for EV strength."""
     if ev_pct >= 15:
         return "█████"
     if ev_pct >= 10:
