@@ -1,33 +1,41 @@
 """
 Player prop analyzer.
 
-Improvements implemented:
-  - Mejora 1:  True EV via devig (no-vig probability stripping)
-  - Mejora 10: Poisson distribution for probability estimation
-  - Mejora 14: Bayesian Laplace smoothing for small samples
-  - EV filter:  Skip picks where model prob <= market fair prob (no edge)
+Bug fixes in this version:
+  - BUG FIX 2:  Two-sided devig using actual Over+Under prices (not a single-side estimate)
+  - BUG FIX 4:  Dynamic league averages calculated from real team_context data
+  - BUG FIX 3:  Playoff detection handled in fetch_player_stats; analyzer is season-type agnostic
+  - FEATURE:    MAX_PICKS_PER_GAME increased to 6 (user wants multiple picks per game)
+
+Improvements retained:
+  - Mejora 1:   True EV via devig
+  - Mejora 10:  Poisson distribution
+  - Mejora 14:  Bayesian Laplace smoothing
+  - Mejoras 5+7: Pace + DEF_RATING context factors
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from scipy.stats import poisson as poisson_dist
 
 from modules.fetch_player_stats import get_stat_value, parse_minutes
 from modules.fetch_props import MARKET_LABELS
 
-# ── Tunable constants ────────────────────────────────────────────────────
-MIN_MINUTES_THRESHOLD = 18.0   # Filter out low-usage / garbage-time players
-MIN_GAMES_REQUIRED    = 5      # Minimum game log sample
-MAX_PICKS_PER_GAME    = 3      # Top N picks per game in the message
+# ── Tunable constants ────────────────────────────────────────────────────────
+MIN_MINUTES_THRESHOLD = 18.0   # Filter garbage-time / low-usage players
+MIN_GAMES_REQUIRED    = 5      # Minimum game log sample to analyze
+MAX_PICKS_PER_GAME    = 6      # Top N picks per game (user wants more picks)
+MAX_TOTAL_PICKS       = 20     # Hard cap across all games to avoid huge messages
 OPP_HISTORY_WEIGHT    = 0.10   # Weight of opponent-specific historical adj
-LOCATION_WEIGHT       = 0.15   # Weight of home/away historical split
+LOCATION_WEIGHT       = 0.15   # Weight of home/away split adjustment
 B2B_PENALTY           = 0.93   # Performance multiplier on back-to-back nights
-LAPLACE_PRIOR         = 0.50   # Bayesian prior probability (50/50)
-LAPLACE_WEIGHT        = 4      # Equivalent prior game observations
-MIN_EV_THRESHOLD      = 2.0    # Minimum EV% to include a pick (filter noise)
-QUARTER_KELLY         = 0.25   # Fraction of full Kelly to recommend
-LEAGUE_AVG_DEF_RATING = 113.5  # Current season approximation
-LEAGUE_AVG_PACE       = 99.5   # Current season approximation
-# ─────────────────────────────────────────────────────────────────────────
+LAPLACE_PRIOR         = 0.50   # Bayesian prior (50/50 neutral)
+LAPLACE_WEIGHT        = 4      # Equivalent prior observations
+MIN_EV_THRESHOLD      = 2.0    # Minimum EV% to include a pick
+QUARTER_KELLY         = 0.25   # Fraction of full Kelly to stake
+# League averages — used as fallback when team_context is empty
+_DEFAULT_LEAGUE_AVG_PACE       = 99.5
+_DEFAULT_LEAGUE_AVG_DEF_RATING = 113.5
+# ────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -47,15 +55,13 @@ class PlayerPick:
     hit_count_l20: int
     games_l10: int
     games_l20: int
-    projection: float          # Adjusted projection
-    edge: float                # Stat-unit edge (projection - line)
+    projection: float          # Context-adjusted projection
+    edge: float                # Stat-unit edge (projection − line)
 
-    # ── New probability / EV fields ─────────────────────────────────────
-    model_prob: float          # Poisson + Bayesian calibrated probability
-    fair_prob: float           # No-vig (deviggged) market probability
+    model_prob: float          # Blended Poisson + Bayesian probability
+    fair_prob: float           # True no-vig probability from devig
     ev_pct: float              # Expected value as % of stake
     kelly_pct: float           # Quarter-Kelly recommended stake %
-    # ────────────────────────────────────────────────────────────────────
 
     consecutive_streak: int
     confidence: str
@@ -64,15 +70,13 @@ class PlayerPick:
     score: float
     is_b2b: bool
     injury_status: str | None = None
-
-    # Context factors applied
     pace_factor: float = 1.0
     dvp_factor: float = 1.0
 
 
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # Public entry point
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
 def analyze_player_props(
     prop_records: list[dict],
@@ -80,18 +84,20 @@ def analyze_player_props(
     injury_statuses: dict[str, str | None],
     b2b_team_abbrs: set[str],
     games: list[dict],
-    team_context: dict | None = None,  # {team_abbr: {pace, def_rating, ...}}
+    team_context: dict | None = None,
 ) -> dict[str, list["PlayerPick"]]:
     """
     Returns {game_label: [PlayerPick, ...]} sorted by EV, capped at MAX_PICKS_PER_GAME.
-    team_context comes from fetch_context.get_team_context().
     """
     game_by_id = {g["id"]: g for g in games}
     tc = team_context or {}
 
+    # BUG FIX 4: compute real league averages from team_context instead of hardcoded values
+    league_avg_pace, league_avg_def = _calculate_league_averages(tc)
+
     picks_by_game: dict[str, list[PlayerPick]] = {}
 
-    # Group outcomes by (player, market_key, game_id) → analyse both Over & Under
+    # Group outcomes by (player, market_key, game_id) — analyse Over & Under together
     grouped: dict[tuple, list[dict]] = {}
     for rec in prop_records:
         key = (rec["player"], rec["market_key"], rec["game_id"])
@@ -112,19 +118,20 @@ def analyze_player_props(
         is_b2b = player_team_abbr in b2b_team_abbrs
         game_label = f"{game['visitor_team']['full_name']} @ {game['home_team']['full_name']}"
 
-        # Build context factors for this matchup
         pace_factor, dvp_factor = _get_context_factors(
-            player_team_abbr, opp_abbr, tc
+            player_team_abbr, opp_abbr, tc, league_avg_pace, league_avg_def
         )
 
         best_pick = None
         for rec in outcomes:
+            # BUG FIX 2: pass opposite_price for proper two-sided devig
             pick = _analyze_one_prop(
                 player=player,
                 market_key=market_key,
                 line=rec["line"],
                 side=rec["side"],
                 price=rec["price"],
+                opposite_price=rec.get("opposite_price"),
                 logs=logs,
                 is_home=is_home,
                 is_b2b=is_b2b,
@@ -142,19 +149,33 @@ def analyze_player_props(
         if best_pick:
             picks_by_game.setdefault(game_label, []).append(best_pick)
 
-    # Sort by score (incorporates EV), cap per game
+    # Sort by score per game, apply per-game cap
     for label in picks_by_game:
         picks_by_game[label].sort(key=lambda p: p.score, reverse=True)
         picks_by_game[label] = picks_by_game[label][:MAX_PICKS_PER_GAME]
 
-    total = sum(len(v) for v in picks_by_game.values())
-    print(f"[analyzer] Total picks selected: {total} across {len(picks_by_game)} games")
-    return picks_by_game
+    # Apply total cross-game cap (sorted by highest EV first)
+    all_picks = [
+        (label, pick)
+        for label, picks in picks_by_game.items()
+        for pick in picks
+    ]
+    all_picks.sort(key=lambda x: x[1].score, reverse=True)
+    all_picks = all_picks[:MAX_TOTAL_PICKS]
+
+    # Rebuild dict preserving game order
+    final: dict[str, list[PlayerPick]] = {}
+    for label, pick in all_picks:
+        final.setdefault(label, []).append(pick)
+
+    total = sum(len(v) for v in final.values())
+    print(f"[analyzer] Total picks selected: {total} across {len(final)} games")
+    return final
 
 
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # Core analysis for a single prop outcome
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _analyze_one_prop(
     player: str,
@@ -162,6 +183,7 @@ def _analyze_one_prop(
     line: float,
     side: str,
     price: int,
+    opposite_price: int | None,
     logs: list[dict],
     is_home: bool,
     is_b2b: bool,
@@ -190,14 +212,14 @@ def _analyze_one_prop(
     n = len(values)
 
     # ── Averages ──────────────────────────────────────────────────────────
-    avg_l5  = sum(values[:5])        / min(5, n)
-    avg_l10 = sum(values[:min(10,n)]) / min(10, n)
-    avg_l20 = sum(values[:min(20,n)]) / min(20, n)
+    avg_l5  = sum(values[:5])          / min(5, n)
+    avg_l10 = sum(values[:min(10, n)]) / min(10, n)
+    avg_l20 = sum(values[:min(20, n)]) / min(20, n)
 
     # Recency-weighted base projection
     base_projection = 0.40 * avg_l5 + 0.35 * avg_l10 + 0.25 * avg_l20
 
-    # ── Context adjustments ───────────────────────────────────────────────
+    # ── Hit rates ─────────────────────────────────────────────────────────
     side_lower = side.lower()
 
     def _hit(v: float) -> bool:
@@ -210,7 +232,7 @@ def _analyze_one_prop(
     rate_l10 = hit_l10 / len(slice_10)
     rate_l20 = hit_l20 / len(slice_20)
 
-    # Home / Away historical split
+    # ── Location split ────────────────────────────────────────────────────
     home_vals = [get_stat_value(g, market_key) for g in logs if "vs." in g.get("MATCHUP", "")]
     home_vals = [v for v in home_vals if v is not None]
     away_vals = [get_stat_value(g, market_key) for g in logs if " @ " in g.get("MATCHUP", "")]
@@ -218,11 +240,11 @@ def _analyze_one_prop(
 
     loc_adj = 0.0
     if is_home and len(home_vals) >= 3:
-        loc_adj = (sum(home_vals)/len(home_vals) - base_projection) * LOCATION_WEIGHT
+        loc_adj = (sum(home_vals) / len(home_vals) - base_projection) * LOCATION_WEIGHT
     elif not is_home and len(away_vals) >= 3:
-        loc_adj = (sum(away_vals)/len(away_vals) - base_projection) * LOCATION_WEIGHT
+        loc_adj = (sum(away_vals) / len(away_vals) - base_projection) * LOCATION_WEIGHT
 
-    # Opponent-specific historical split
+    # ── Opponent-specific split ───────────────────────────────────────────
     opp_vals = [
         get_stat_value(g, market_key) for g in logs
         if opp_abbr and opp_abbr.upper() in g.get("MATCHUP", "").upper()
@@ -230,9 +252,9 @@ def _analyze_one_prop(
     opp_vals = [v for v in opp_vals if v is not None]
     opp_adj = 0.0
     if len(opp_vals) >= 2:
-        opp_adj = (sum(opp_vals)/len(opp_vals) - base_projection) * OPP_HISTORY_WEIGHT
+        opp_adj = (sum(opp_vals) / len(opp_vals) - base_projection) * OPP_HISTORY_WEIGHT
 
-    # Apply all adjustments multiplicatively then add additive context
+    # ── Context-adjusted projection ───────────────────────────────────────
     adj_projection = (
         base_projection
         * (B2B_PENALTY if is_b2b else 1.0)
@@ -243,34 +265,28 @@ def _analyze_one_prop(
     )
     adj_projection = max(0.0, round(adj_projection, 1))
 
-    # Stat-unit edge
-    if side_lower == "over":
-        edge = round(adj_projection - line, 1)
-    else:
-        edge = round(line - adj_projection, 1)
+    edge = round(adj_projection - line, 1) if side_lower == "over" else round(line - adj_projection, 1)
 
-    # ── Mejora 10: Poisson probability ───────────────────────────────────
+    # ── Poisson probability (Mejora 10) ───────────────────────────────────
     poisson_prob = _poisson_prob(adj_projection, line, side_lower)
 
-    # ── Mejora 14: Bayesian Laplace-smoothed hit rate ────────────────────
-    raw_hit_rate = rate_l10
+    # ── Bayesian hit rate (Mejora 14) ─────────────────────────────────────
     bayes_prob = _bayesian_prob(hit_l10, len(slice_10))
 
-    # Blend Poisson + Bayesian (50/50) for final model probability
+    # Blend 50/50
     model_prob = 0.50 * poisson_prob + 0.50 * bayes_prob
 
-    # ── Mejora 1: Devig + EV ─────────────────────────────────────────────
-    # Find the opposite side price (Over ↔ Under) from the same record
-    # We don't have it here directly, so we use the single-side devig
-    # with a typical vig assumption (-110 juice on each side) as fallback
-    fair_prob = _devig_single(price)
+    # ── BUG FIX 2: Two-sided devig (Mejora 1) ────────────────────────────
+    if opposite_price is not None:
+        fair_prob = _devig_two_sides(price, opposite_price)
+    else:
+        fair_prob = _devig_single(price)
+
     ev_pct = _expected_value_pct(model_prob, price)
 
-    # EV filter: skip if model sees no edge over the fair market price
     if ev_pct < MIN_EV_THRESHOLD:
         return None
 
-    # ── Quarter-Kelly stake suggestion ────────────────────────────────────
     kelly_pct = _quarter_kelly(model_prob, price)
 
     # ── Consecutive streak ────────────────────────────────────────────────
@@ -281,7 +297,7 @@ def _analyze_one_prop(
         else:
             break
 
-    # ── Confidence tier (now EV-driven primarily) ─────────────────────────
+    # ── Confidence tier ───────────────────────────────────────────────────
     if ev_pct >= 10.0 and rate_l10 >= 0.65:
         confidence = "Alta"
     elif ev_pct >= 5.0 and rate_l10 >= 0.55:
@@ -310,7 +326,7 @@ def _analyze_one_prop(
         model_prob=model_prob,
         is_b2b=is_b2b,
         opp_vals=opp_vals,
-        opp_avg=sum(opp_vals)/len(opp_vals) if opp_vals else None,
+        opp_avg=sum(opp_vals) / len(opp_vals) if opp_vals else None,
         opp_abbr=opp_abbr,
         is_home=is_home,
         home_vals=home_vals,
@@ -325,7 +341,6 @@ def _analyze_one_prop(
         f"Hit L20: {hit_l20}/{len(slice_20)} ({rate_l20*100:.0f}%)"
     )
 
-    # Score = EV (primary) + hit rate bonus
     score = (ev_pct / 100.0) * 0.60 + rate_l10 * 0.25 + rate_l20 * 0.15
 
     return PlayerPick(
@@ -361,20 +376,15 @@ def _analyze_one_prop(
     )
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# Probability / EV helpers  (Mejoras 1, 10, 14)
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# Probability / EV helpers
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _poisson_prob(lambda_rate: float, line: float, side: str) -> float:
-    """
-    Mejora 10 — Poisson CDF probability for count stats.
-    P(X > line) = 1 - P(X <= floor(line))
-    P(X < line) = P(X <= floor(line - 1))
-    Lines are typically x.5, so floor(line) = line - 0.5.
-    """
+    """Poisson CDF probability for count stats."""
     if lambda_rate <= 0:
         return 0.5
-    floor_line = int(line)  # e.g. 24.5 → 24
+    floor_line = int(line)
     try:
         if side == "over":
             return float(1.0 - poisson_dist.cdf(floor_line, mu=lambda_rate))
@@ -385,11 +395,7 @@ def _poisson_prob(lambda_rate: float, line: float, side: str) -> float:
 
 
 def _bayesian_prob(hits: int, games: int) -> float:
-    """
-    Mejora 14 — Laplace-smoothed hit rate.
-    Pulls extreme small-sample estimates toward 50% prior.
-    Formula: (hits + prior*weight) / (games + weight)
-    """
+    """Laplace-smoothed hit rate. Pulls extreme small-sample estimates toward 50%."""
     return (hits + LAPLACE_PRIOR * LAPLACE_WEIGHT) / (games + LAPLACE_WEIGHT)
 
 
@@ -400,31 +406,31 @@ def american_to_implied_prob(american_odds: int) -> float:
     return abs(american_odds) / (abs(american_odds) + 100.0)
 
 
+def _devig_two_sides(price_this: int, price_other: int) -> float:
+    """
+    BUG FIX: Proper two-sided devig using both Over and Under prices.
+    fair_prob = implied_this / (implied_this + implied_other)
+    This is mathematically correct and removes the vig symmetrically.
+    """
+    implied_this  = american_to_implied_prob(price_this)
+    implied_other = american_to_implied_prob(price_other)
+    total = implied_this + implied_other
+    return implied_this / total if total > 0 else 0.5
+
+
 def _devig_single(price: int) -> float:
     """
-    Mejora 1 — Single-side devig.
-    Without the opposite side price, assume a symmetric market
-    (typical -110/-110 line) and devig accordingly.
-    Returns fair (no-vig) probability for this side.
+    Single-side devig fallback (when opposite price is unavailable).
+    Assumes a roughly symmetric market.
     """
     implied = american_to_implied_prob(price)
-    # Assume symmetric vig: total overround split 50/50
-    # fair_prob = implied / (implied + (1 - implied)) = implied (symmetric)
-    # Better: assume other side is also implied. Total = implied + (1-implied) ≈ 1 + vig
-    # For -110/-110: each side implied = 52.38%, total = 104.76%, vig = 4.76%
-    # fair = 52.38 / 104.76 = 50%
-    # Generalise: assume other side price mirrors this one
-    other_implied = 1.0 - implied + (implied - 0.5) * 0.05  # slight asymmetry assumption
+    other_implied = 1.0 - implied + (implied - 0.5) * 0.05
     total = implied + other_implied
     return implied / total
 
 
 def _expected_value_pct(model_prob: float, american_odds: int) -> float:
-    """
-    Mejora 1 — EV as a percentage of stake.
-    EV% = (model_prob × net_win) - ((1-model_prob) × 100)
-    Net win for +150 = 150; for -115 = 100/1.15 ≈ 86.96
-    """
+    """EV as a percentage of stake."""
     if american_odds >= 0:
         net_win = float(american_odds)
     else:
@@ -434,11 +440,7 @@ def _expected_value_pct(model_prob: float, american_odds: int) -> float:
 
 
 def _quarter_kelly(model_prob: float, american_odds: int) -> float:
-    """
-    Quarter-Kelly criterion stake as % of bankroll.
-    f = (b*p - q) / b   where b = decimal_odds - 1
-    Returns max(0, f * 0.25) capped at 5%.
-    """
+    """Quarter-Kelly stake as % of bankroll, capped at 5%."""
     if american_odds >= 0:
         decimal = american_odds / 100.0 + 1.0
     else:
@@ -446,45 +448,56 @@ def _quarter_kelly(model_prob: float, american_odds: int) -> float:
     b = decimal - 1.0
     if b <= 0:
         return 0.0
-    p = model_prob
-    q = 1.0 - p
-    full_kelly = (b * p - q) / b
+    full_kelly = (b * model_prob - (1.0 - model_prob)) / b
     qk = max(0.0, full_kelly * QUARTER_KELLY)
-    return round(min(qk * 100.0, 5.0), 2)  # return as %, cap at 5%
+    return round(min(qk * 100.0, 5.0), 2)
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# Context factors  (Mejoras 5 + 7)
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# Context factors — Pace + DEF_RATING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _calculate_league_averages(team_context: dict) -> tuple[float, float]:
+    """
+    BUG FIX 4: Calculate actual league-average pace and DEF_RATING from
+    the real team data instead of hardcoded constants.
+    Falls back to defaults if team_context is empty.
+    """
+    if not team_context:
+        return _DEFAULT_LEAGUE_AVG_PACE, _DEFAULT_LEAGUE_AVG_DEF_RATING
+
+    paces = [v["pace"] for v in team_context.values() if v.get("pace")]
+    def_ratings = [v["def_rating"] for v in team_context.values() if v.get("def_rating")]
+
+    avg_pace = sum(paces) / len(paces) if paces else _DEFAULT_LEAGUE_AVG_PACE
+    avg_def  = sum(def_ratings) / len(def_ratings) if def_ratings else _DEFAULT_LEAGUE_AVG_DEF_RATING
+
+    print(f"[analyzer] Dynamic league averages: pace={avg_pace:.1f}, DEF_RATING={avg_def:.1f}")
+    return avg_pace, avg_def
+
 
 def _get_context_factors(
     player_team: str,
     opp_abbr: str,
     team_context: dict,
+    league_avg_pace: float,
+    league_avg_def: float,
 ) -> tuple[float, float]:
-    """
-    Returns (pace_factor, dvp_factor) for a player's matchup.
-
-    pace_factor: how this game's expected pace compares to league average.
-      > 1.0 means more possessions → more stat opportunities.
-
-    dvp_factor: opponent defensive rating factor.
-      > 1.0 means weak defense → easier to score.
-    """
-    player_pace = team_context.get(player_team, {}).get("pace", LEAGUE_AVG_PACE)
-    opp_pace    = team_context.get(opp_abbr, {}).get("pace", LEAGUE_AVG_PACE)
+    """Returns (pace_factor, dvp_factor) for a player's matchup."""
+    player_pace = team_context.get(player_team, {}).get("pace", league_avg_pace)
+    opp_pace    = team_context.get(opp_abbr, {}).get("pace", league_avg_pace)
     game_pace   = (player_pace + opp_pace) / 2.0
-    pace_factor = round(game_pace / LEAGUE_AVG_PACE, 4)
+    pace_factor = round(game_pace / league_avg_pace, 4) if league_avg_pace > 0 else 1.0
 
-    opp_def_rating = team_context.get(opp_abbr, {}).get("def_rating", LEAGUE_AVG_DEF_RATING)
-    dvp_factor = round(LEAGUE_AVG_DEF_RATING / opp_def_rating, 4) if opp_def_rating > 0 else 1.0
+    opp_def_rating = team_context.get(opp_abbr, {}).get("def_rating", league_avg_def)
+    dvp_factor = round(league_avg_def / opp_def_rating, 4) if opp_def_rating > 0 else 1.0
 
     return pace_factor, dvp_factor
 
 
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # Natural language headline builder
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _build_headline(
     player, market_label, side, line, values, streak,
@@ -521,22 +534,22 @@ def _build_headline(
     sign = "+" if edge >= 0 else ""
     parts.append(f"Proyección ajustada: {adj_projection} ({sign}{edge} vs línea)")
 
-    # 4. EV statement
+    # 4. EV
     parts.append(f"EV: +{ev_pct:.1f}% | Prob. modelo: {model_prob*100:.0f}%")
 
     # 5. Pace
     if pace_factor >= 1.03:
-        parts.append(f"Ritmo de juego elevado (+{(pace_factor-1)*100:.1f}% posesiones)")
+        parts.append(f"Ritmo elevado (+{(pace_factor-1)*100:.1f}% posesiones)")
     elif pace_factor <= 0.97:
-        parts.append(f"Ritmo de juego lento (-{(1-pace_factor)*100:.1f}% posesiones)")
+        parts.append(f"Ritmo lento (-{(1-pace_factor)*100:.1f}% posesiones)")
 
-    # 6. DVPOP
+    # 6. DvP
     if dvp_factor >= 1.04:
-        parts.append(f"Defensa rival débil — factor DvP: +{(dvp_factor-1)*100:.1f}%")
+        parts.append(f"Defensa rival débil — DvP: +{(dvp_factor-1)*100:.1f}%")
     elif dvp_factor <= 0.97:
-        parts.append(f"Defensa rival sólida — factor DvP: {(dvp_factor-1)*100:.1f}%")
+        parts.append(f"Defensa rival sólida — DvP: {(dvp_factor-1)*100:.1f}%")
 
-    # 7. B2B flag
+    # 7. B2B
     if is_b2b:
         parts.append("Back-to-back — rendimiento suele bajar ~7%")
 

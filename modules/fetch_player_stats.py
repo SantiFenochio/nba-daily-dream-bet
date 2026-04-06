@@ -41,6 +41,20 @@ def _current_season() -> str:
     return f"{year}-{str(year + 1)[-2:]}"
 
 
+def _current_season_type() -> str:
+    """
+    BUG FIX: Detect NBA season phase so we pull the right game logs.
+    - Regular season ends ~April 12
+    - Play-In: ~April 14-17  (nba_api uses "PlayIn" or "Regular Season" for those)
+    - Playoffs: ~April 18 onwards
+    """
+    today = date.today()
+    # Playoffs start around April 18 each year
+    if today.month > 4 or (today.month == 4 and today.day >= 18):
+        return "Playoffs"
+    return "Regular Season"
+
+
 def _normalize(text: str) -> str:
     """Lowercase + strip accents for fuzzy matching (handles Jokić → Jokic etc.)."""
     return unicodedata.normalize("NFD", text.lower().strip()).encode("ascii", "ignore").decode()
@@ -82,9 +96,32 @@ def find_player_id(name: str) -> int | None:
     return None
 
 
+def _fetch_game_logs(player_id: int, season: str, season_type: str, last_n: int) -> list[dict]:
+    """Internal: fetch game logs for a specific season type."""
+    try:
+        time.sleep(0.7)  # Respect stats.nba.com rate limit
+        logs = playergamelogs.PlayerGameLogs(
+            player_id_nullable=str(player_id),
+            season_nullable=season,
+            season_type_nullable=season_type,
+            last_n_games_nullable=last_n,
+        )
+        df = logs.get_data_frames()[0]
+        if df.empty:
+            return []
+        df = df.sort_values("GAME_DATE", ascending=False).reset_index(drop=True)
+        return df.to_dict("records")
+    except Exception as e:
+        print(f"[player_stats] ERROR fetching logs ({season_type}): {e}")
+        return []
+
+
 def get_player_logs(player_name: str, last_n: int = 20) -> list[dict]:
     """
-    Fetch the last `last_n` game logs for a player via nba_api (stats.nba.com).
+    Fetch the last `last_n` game logs for a player via nba_api.
+    BUG FIX: Detects playoffs automatically. If in playoffs but fewer than
+    5 games, supplements with recent regular season games so the model
+    always has enough data.
     Returns a list of dicts sorted newest-first, or [] on failure.
     """
     player_id = find_player_id(player_name)
@@ -93,26 +130,25 @@ def get_player_logs(player_name: str, last_n: int = 20) -> list[dict]:
         return []
 
     season = _current_season()
-    try:
-        time.sleep(0.7)  # Respect stats.nba.com rate limit
-        logs = playergamelogs.PlayerGameLogs(
-            player_id_nullable=str(player_id),
-            season_nullable=season,
-            season_type_nullable="Regular Season",
-            last_n_games_nullable=last_n,
-        )
-        df = logs.get_data_frames()[0]
-        if df.empty:
-            print(f"[player_stats] No logs for {player_name} (season {season})")
-            return []
+    season_type = _current_season_type()
 
-        df = df.sort_values("GAME_DATE", ascending=False).reset_index(drop=True)
-        records = df.to_dict("records")
-        print(f"[player_stats] {player_name}: {len(records)} games fetched")
-        return records
-    except Exception as e:
-        print(f"[player_stats] ERROR fetching {player_name}: {e}")
-        return []
+    records = _fetch_game_logs(player_id, season, season_type, last_n)
+
+    # In playoffs: supplement with regular season data if not enough playoff games
+    if season_type == "Playoffs" and len(records) < 5:
+        print(f"[player_stats] {player_name}: only {len(records)} playoff games — supplementing with regular season")
+        reg_records = _fetch_game_logs(player_id, season, "Regular Season", last_n)
+        existing_ids = {r.get("GAME_ID") for r in records}
+        supplemental = [r for r in reg_records if r.get("GAME_ID") not in existing_ids]
+        records = records + supplemental
+
+    records = records[:last_n]
+
+    if records:
+        print(f"[player_stats] {player_name}: {len(records)} games fetched ({season_type})")
+    else:
+        print(f"[player_stats] No logs for {player_name} (season {season}, type {season_type})")
+    return records
 
 
 def get_stat_value(game: dict, market_key: str) -> float | None:
@@ -152,83 +188,193 @@ def parse_minutes(min_val) -> float:
     return 0.0
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# Injury status — ESPN public API (primary) + Rotowire (fallback)
+# BUG FIX: Rotowire CSS selectors were broken. Now uses ESPN JSON API first.
+# ══════════════════════════════════════════════════════════════════════════
+
 def get_injury_statuses(player_names: list[str]) -> dict[str, str | None]:
     """
-    Mejora 13 — Scrape NBA injury report from Rotowire (free, no auth required).
     Returns {player_name: injury_description_or_None}.
-    Falls back gracefully on any error.
+    Primary: ESPN public API (no auth, JSON).
+    Fallback: Rotowire scraper.
     """
     result: dict[str, str | None] = {n: None for n in player_names}
 
-    if not BS4_AVAILABLE:
-        print("[player_stats] beautifulsoup4 not installed — skipping injury check")
-        return result
-
+    # ── Primary: ESPN public API ──────────────────────────────────────────
     try:
-        print("[player_stats] Fetching injury report from Rotowire...")
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        resp = requests.get(
-            "https://www.rotowire.com/basketball/injury-report.php",
-            headers=headers,
-            timeout=15,
-        )
-        resp.raise_for_status()
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        # Rotowire injury table: each row has player name + status + description
-        injured: dict[str, str] = {}
-        for row in soup.select("tr.injury-report__row, div.player-injury"):
-            # Try table row format
-            cells = row.select("td")
-            if len(cells) >= 4:
-                raw_name   = cells[0].get_text(strip=True)
-                status_txt = cells[2].get_text(strip=True)
-                desc_txt   = cells[3].get_text(strip=True)
-                if raw_name and status_txt.lower() not in ("active", ""):
-                    label = f"{status_txt} — {desc_txt}" if desc_txt else status_txt
-                    injured[_normalize(raw_name)] = label
-
-        # Fallback: try link-based player names
-        if not injured:
-            for link in soup.select("a.player-injury__name, td.player-injury-report__player a"):
-                raw_name = link.get_text(strip=True)
-                row = link.find_parent("tr") or link.find_parent("div")
-                if row:
-                    status_el = row.select_one(".player-injury__status, td:nth-child(3)")
-                    desc_el   = row.select_one(".player-injury__desc,  td:nth-child(4)")
-                    status_txt = status_el.get_text(strip=True) if status_el else ""
-                    desc_txt   = desc_el.get_text(strip=True)   if desc_el   else ""
-                    if raw_name and status_txt.lower() not in ("active", ""):
-                        label = f"{status_txt} — {desc_txt}" if desc_txt else status_txt
-                        injured[_normalize(raw_name)] = label
-
-        print(f"[player_stats] Rotowire: {len(injured)} injured/questionable players found")
-
-        # Match against our target player list
-        for target in player_names:
-            target_norm = _normalize(target)
-            # Exact match first
-            if target_norm in injured:
-                result[target] = injured[target_norm]
-                print(f"[player_stats] Injury: {target} → {injured[target_norm]}")
-                continue
-            # Partial: all parts of target name in injured name
-            parts = target_norm.split()
-            for inj_name, inj_status in injured.items():
-                if all(p in inj_name for p in parts):
-                    result[target] = inj_status
-                    print(f"[player_stats] Injury (fuzzy): {target} → {inj_status}")
-                    break
-
+        print("[player_stats] Fetching injury report from ESPN API...")
+        injured = _fetch_espn_injuries()
+        if injured:
+            _match_injuries(injured, player_names, result)
+            injured_count = sum(1 for v in result.values() if v)
+            print(f"[player_stats] ESPN: {injured_count} of {len(player_names)} players flagged")
+            return result
+        else:
+            print("[player_stats] ESPN returned 0 injuries — trying Rotowire fallback...")
     except Exception as e:
-        print(f"[player_stats] Rotowire injury fetch error: {e}")
+        print(f"[player_stats] ESPN injury API error: {e} — trying Rotowire fallback...")
+
+    # ── Fallback: Rotowire ────────────────────────────────────────────────
+    if BS4_AVAILABLE:
+        try:
+            injured = _fetch_rotowire_injuries()
+            if injured:
+                _match_injuries(injured, player_names, result)
+                injured_count = sum(1 for v in result.values() if v)
+                print(f"[player_stats] Rotowire: {injured_count} of {len(player_names)} players flagged")
+        except Exception as e:
+            print(f"[player_stats] Rotowire also failed: {e}")
 
     return result
+
+
+def _ascii_safe(text: str) -> str:
+    """Replace non-ASCII characters so Windows console (cp1252) doesn't choke."""
+    return unicodedata.normalize("NFD", text).encode("ascii", "replace").decode("ascii")
+
+
+def _fetch_espn_injuries() -> dict[str, str]:
+    """
+    ESPN public API — no auth required.
+    Returns {normalized_player_name: status_string}.
+    """
+    url = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
+    resp = requests.get(
+        url,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    injured: dict[str, str] = {}
+
+    # ESPN response: {"injuries": [{"team": {...}, "injuries": [{...}, ...]}, ...]}
+    team_groups = data.get("injuries", [])
+    for group in team_groups:
+        for entry in group.get("injuries", []):
+            athlete = entry.get("athlete", {})
+            raw_name = athlete.get("displayName", "").strip()
+            if not raw_name:
+                continue
+
+            status = entry.get("status", "").strip()
+            # Skip "Active" — only flag truly limited/out players
+            if not status or status.lower() in ("active", ""):
+                continue
+
+            # Build description — sanitize to ASCII to avoid Windows encoding errors
+            details = entry.get("details", {})
+            injury_type = _ascii_safe(details.get("type", ""))
+            detail_desc  = _ascii_safe(details.get("detail", ""))
+            long_comment = _ascii_safe(entry.get("longComment", "")[:80])
+
+            if detail_desc:
+                desc = f"{status} - {detail_desc}"
+            elif injury_type:
+                desc = f"{status} - {injury_type}"
+            elif long_comment:
+                desc = f"{status} - {long_comment}"
+            else:
+                desc = status
+
+            injured[_normalize(raw_name)] = desc
+
+    return injured
+
+
+def _fetch_rotowire_injuries() -> dict[str, str]:
+    """
+    Rotowire fallback — improved multi-selector parsing.
+    Returns {normalized_player_name: status_string}.
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    resp = requests.get(
+        "https://www.rotowire.com/basketball/injury-report.php",
+        headers=headers,
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    injured: dict[str, str] = {}
+
+    # Try multiple selectors for different Rotowire HTML versions
+    selectors = [
+        "tr.injury-report__row",
+        "tr[class*='injury-report']",
+        "div.lineup__player",
+    ]
+
+    rows = []
+    for sel in selectors:
+        rows = soup.select(sel)
+        if rows:
+            break
+
+    for row in rows:
+        cells = row.select("td")
+        if len(cells) < 4:
+            continue
+        raw_name = cells[0].get_text(strip=True)
+        status_txt = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+        desc_txt = cells[3].get_text(strip=True) if len(cells) > 3 else ""
+
+        if not raw_name or status_txt.lower() in ("active", ""):
+            continue
+
+        label = f"{status_txt} — {desc_txt}" if desc_txt else status_txt
+        injured[_normalize(raw_name)] = label
+
+    # Generic fallback: find any table that looks like an injury report
+    if not injured:
+        for table in soup.find_all("table"):
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) < 3:
+                    continue
+                raw_name = cells[0].get_text(strip=True)
+                # Look for status keywords in any cell
+                row_text = " ".join(c.get_text(strip=True).lower() for c in cells)
+                if any(kw in row_text for kw in ("questionable", "out", "doubtful", "day-to-day", "gtd")):
+                    status_txt = next(
+                        (c.get_text(strip=True) for c in cells
+                         if c.get_text(strip=True).lower() in ("questionable", "out", "doubtful", "day-to-day", "gtd")),
+                        "Questionable"
+                    )
+                    if raw_name:
+                        injured[_normalize(raw_name)] = status_txt
+
+    print(f"[player_stats] Rotowire: {len(injured)} injured/questionable found")
+    return injured
+
+
+def _match_injuries(
+    injured: dict[str, str],
+    player_names: list[str],
+    result: dict[str, str | None],
+) -> None:
+    """Match injury dict (normalized names) against target player list."""
+    for target in player_names:
+        target_norm = _normalize(target)
+        # Exact match
+        if target_norm in injured:
+            result[target] = injured[target_norm]
+            print(f"[player_stats] Injury: {target} -> {injured[target_norm]}")
+            continue
+        # All name parts present
+        parts = target_norm.split()
+        for inj_name, inj_status in injured.items():
+            if all(p in inj_name for p in parts):
+                result[target] = inj_status
+                print(f"[player_stats] Injury (fuzzy): {target} -> {inj_status}")
+                break
