@@ -113,6 +113,15 @@ def _format_pick(pick: PlayerPick) -> list[str]:
         pct = round((pick.absence_boost - 1.0) * 100)
         lines.append(f"  📈 Compañero ausente — uso proyectado +{pct}%")
 
+    # Foul trouble warning
+    if pick.foul_risk:
+        foul_parts = [f"{pick.avg_fouls:.1f} PF/j (prom. L10)"]
+        if pick.foul_out_count >= 2:
+            foul_parts.append(f"{pick.foul_out_count} foul-outs en últ. 20j")
+        if pick.foul_trouble_count >= 3:
+            foul_parts.append(f"salió temprano por faltas {pick.foul_trouble_count}x")
+        lines.append(f"  🟡 <b>Riesgo faltas:</b> {' | '.join(foul_parts)}")
+
     # Injury warning
     if pick.injury_status:
         lines.append(f"  🚨 <b>Lesión:</b> {_h(pick.injury_status)}")

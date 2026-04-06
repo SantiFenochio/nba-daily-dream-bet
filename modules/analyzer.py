@@ -39,6 +39,13 @@ BLOWOUT_FAVORITE_PENALTY = 0.91   # 9% reduction for blowout-risk games (SGA eff
 # Teammate absence boost — if a key teammate is out, remaining players get
 # more usage and possessions (Flagg/LeBron effect when Doncic+Reaves sat).
 ABSENCE_BOOST_PER_PLAYER = 0.10   # 10% per confirmed-Out teammate (capped at 2)
+# Foul trouble — players who are historically foul-prone risk reduced minutes
+# when sitting due to early foul accumulation.
+FOUL_HIGH_AVG_THRESHOLD  = 3.3    # avg PF/game — considered foul-prone
+FOUL_TROUBLE_MIN_RATIO   = 0.78   # below this fraction of avg minutes = sat due to fouls
+FOUL_TROUBLE_COUNT_RISK  = 3      # 3+ foul-trouble games in last 20 = high risk
+FOUL_OUT_COUNT_RISK      = 2      # 2+ foul-outs (6 PF) in last 20 = very high risk
+FOUL_TROUBLE_PENALTY     = 0.95   # 5% projection penalty for foul-prone players
 # League averages — fallback when team_context is empty
 _DEFAULT_LEAGUE_AVG_PACE       = 99.5
 _DEFAULT_LEAGUE_AVG_DEF_RATING = 113.5
@@ -81,6 +88,10 @@ class PlayerPick:
     dvp_factor: float = 1.0
     blowout_risk: bool = False       # Favored team by 12+ pts — star may sit 4th
     absence_boost: float = 1.0      # Multiplier from absent teammates
+    foul_risk: bool = False          # Player is historically foul-prone
+    avg_fouls: float = 0.0          # Average personal fouls per game (L10)
+    foul_out_count: int = 0         # Foul-outs (6 PF) in last 20 games
+    foul_trouble_count: int = 0     # Games sat early due to foul trouble (L20)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -240,6 +251,34 @@ def _analyze_one_prop(
     if min_vals and (sum(min_vals) / len(min_vals)) < MIN_MINUTES_THRESHOLD:
         return None
 
+    avg_minutes_l10 = (sum(min_vals) / len(min_vals)) if min_vals else 30.0
+
+    # ── Foul trouble analysis (PF column from nba_api) ────────────────────
+    # Uses last 20 games to detect chronic foul issues.
+    # Three signals:
+    #   1. High average fouls/game (foul-prone player)
+    #   2. Foul-outs (6 PF in a game) — forced early exit
+    #   3. Foul-trouble games — 4+ PF AND played materially fewer minutes
+    foul_vals_l20 = [float(g.get("PF", 0) or 0) for g in logs[:20]]
+    min_vals_l20  = [parse_minutes(g.get("MIN", 0)) for g in logs[:20]]
+
+    avg_fouls     = (sum(foul_vals_l20[:10]) / min(10, len(foul_vals_l20))
+                     if foul_vals_l20 else 0.0)
+    foul_out_count = sum(1 for f in foul_vals_l20 if f >= 6)
+
+    # Foul trouble: 4+ fouls AND played under 78% of their average minutes
+    foul_trouble_count = sum(
+        1 for f, m in zip(foul_vals_l20, min_vals_l20)
+        if f >= 4 and avg_minutes_l10 > 0 and (m / avg_minutes_l10) < FOUL_TROUBLE_MIN_RATIO
+    )
+
+    # Flag as foul risk if any threshold is met
+    foul_risk = (
+        avg_fouls    >= FOUL_HIGH_AVG_THRESHOLD or
+        foul_out_count  >= FOUL_OUT_COUNT_RISK or
+        foul_trouble_count >= FOUL_TROUBLE_COUNT_RISK
+    )
+
     # ── Collect stat values ───────────────────────────────────────────────
     values: list[float] = []
     for g in logs:
@@ -303,6 +342,7 @@ def _analyze_one_prop(
         * dvp_factor
         * (BLOWOUT_FAVORITE_PENALTY if blowout_risk else 1.0)   # blowout: star sits early
         * absence_boost                                           # teammate out: more usage
+        * (FOUL_TROUBLE_PENALTY if foul_risk else 1.0)           # foul-prone: minutes risk
         + loc_adj
         + opp_adj
     )
@@ -378,12 +418,26 @@ def _analyze_one_prop(
         dvp_factor=dvp_factor,
         blowout_risk=blowout_risk,
         absent_teammates=absent_teammates or set(),
+        foul_risk=foul_risk,
+        avg_fouls=avg_fouls,
+        foul_out_count=foul_out_count,
+        foul_trouble_count=foul_trouble_count,
     )
+
+    foul_detail = ""  # built below, appended to detail string
+    if foul_risk:
+        parts_f = [f"Prom. faltas: {avg_fouls:.1f}/j"]
+        if foul_out_count >= FOUL_OUT_COUNT_RISK:
+            parts_f.append(f"foul-outs: {foul_out_count}/20j")
+        if foul_trouble_count >= FOUL_TROUBLE_COUNT_RISK:
+            parts_f.append(f"salidas tempranas por faltas: {foul_trouble_count}/20j")
+        foul_detail = " | " + " | ".join(parts_f)
 
     detail = (
         f"L5: {avg_l5:.1f} | L10: {avg_l10:.1f} | L20: {avg_l20:.1f} | "
         f"Hit L10: {hit_l10}/{len(slice_10)} ({rate_l10*100:.0f}%) | "
         f"Hit L20: {hit_l20}/{len(slice_20)} ({rate_l20*100:.0f}%)"
+        f"{foul_detail}"
     )
 
     score = (ev_pct / 100.0) * 0.60 + rate_l10 * 0.25 + rate_l20 * 0.15
@@ -420,6 +474,10 @@ def _analyze_one_prop(
         dvp_factor=dvp_factor,
         blowout_risk=blowout_risk,
         absence_boost=absence_boost,
+        foul_risk=foul_risk,
+        avg_fouls=round(avg_fouls, 1),
+        foul_out_count=foul_out_count,
+        foul_trouble_count=foul_trouble_count,
     )
 
 
@@ -555,6 +613,10 @@ def _build_headline(
     pace_factor, dvp_factor,
     blowout_risk: bool = False,
     absent_teammates: set | None = None,
+    foul_risk: bool = False,
+    avg_fouls: float = 0.0,
+    foul_out_count: int = 0,
+    foul_trouble_count: int = 0,
 ) -> str:
     n10 = min(10, len(values))
     parts = []
@@ -607,6 +669,15 @@ def _build_headline(
     # 8. Blowout risk warning
     if blowout_risk:
         parts.append(f"Alerta paliza: favorito por 12+ pts — posible reduccion de minutos en 4to cuarto")
+
+    # 9. Foul trouble risk
+    if foul_risk:
+        foul_parts = [f"Riesgo faltas: {avg_fouls:.1f} PF/partido"]
+        if foul_out_count >= FOUL_OUT_COUNT_RISK:
+            foul_parts.append(f"{foul_out_count} foul-outs en ultimos 20j")
+        if foul_trouble_count >= FOUL_TROUBLE_COUNT_RISK:
+            foul_parts.append(f"salio temprano por faltas en {foul_trouble_count} partidos")
+        parts.append(" — ".join(foul_parts))
 
     # 9. B2B
     if is_b2b:
