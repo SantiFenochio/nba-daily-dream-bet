@@ -1,7 +1,7 @@
 import asyncio
 import os
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -17,6 +17,7 @@ from modules.telegram_client import send_telegram_message
 load_dotenv()
 
 ET = ZoneInfo("America/New_York")
+AR = timezone(timedelta(hours=-3))  # Argentina UTC-3 (no DST)
 
 
 def _get_b2b_team_abbrs(date_str: str) -> set[str]:
@@ -34,6 +35,26 @@ def _get_b2b_team_abbrs(date_str: str) -> set[str]:
     else:
         print("[main] No back-to-back teams today.")
     return b2b
+
+
+def _build_game_times(games: list[dict]) -> dict[str, str]:
+    """
+    Build {game_label: hora_argentina} for upcoming games.
+    BallDontLie returns status as ISO UTC timestamp for unstarted games
+    (e.g. "2026-04-06T01:00:00Z") and a string like "Final" / "3rd Qtr" otherwise.
+    """
+    result: dict[str, str] = {}
+    for g in games:
+        label = f"{g['visitor_team']['full_name']} @ {g['home_team']['full_name']}"
+        status = g.get("status", "")
+        if status and "T" in status and "Z" in status:
+            try:
+                dt_utc = datetime.fromisoformat(status.replace("Z", "+00:00"))
+                dt_ar = dt_utc.astimezone(AR)
+                result[label] = dt_ar.strftime("%H:%M hs (ARG)")
+            except Exception:
+                pass  # leave no entry — formatter will skip it
+    return result
 
 
 async def main():
@@ -55,7 +76,7 @@ async def main():
         print("[main] Checking back-to-back teams...")
         b2b_team_abbrs = _get_b2b_team_abbrs(date_str)
 
-        # ── 3. Team context: pace + DEF_RATING (mejoras 5 + 7) ───────────────
+        # ── 3. Team context: pace + DEF_RATING ───────────────────────────────
         print("[main] Fetching team context (pace + DEF_RATING)...")
         team_context = get_team_context()
 
@@ -82,8 +103,8 @@ async def main():
         found = sum(1 for v in player_logs.values() if v)
         print(f"[main] Game logs fetched: {found}/{len(unique_players)} players matched")
 
-        # ── 7. Injury statuses via Rotowire (mejora 13) ──────────────────────
-        print("[main] Checking injury statuses (Rotowire)...")
+        # ── 7. Injury statuses via ESPN API ──────────────────────────────────
+        print("[main] Checking injury statuses (ESPN)...")
         injury_statuses = get_injury_statuses(unique_players)
 
         # ── 8. Analyze ───────────────────────────────────────────────────────
@@ -105,9 +126,12 @@ async def main():
             )
             return
 
-        # ── 9. Format and send ────────────────────────────────────────────────
+        # ── 9. Game start times in Argentina timezone ─────────────────────────
+        game_times = _build_game_times(games)
+
+        # ── 10. Format and send ───────────────────────────────────────────────
         print("[main] Formatting and sending message...")
-        message = format_message(picks_by_game)
+        message = format_message(picks_by_game, game_times=game_times)
         await send_telegram_message(message)
         print("[main] Done.")
 
