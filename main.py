@@ -138,7 +138,7 @@ async def main():
 
         # ── 9. Analyze ───────────────────────────────────────────────────────
         print("[main] Analyzing player props...")
-        picks_by_game = analyze_player_props(
+        shared_args = dict(
             prop_records=prop_records,
             player_logs=player_logs,
             injury_statuses=injury_statuses,
@@ -148,12 +148,23 @@ async def main():
             game_lines=game_lines,
             team_absent_players=team_absent_players,
         )
+        picks_by_game = analyze_player_props(**shared_args)
+
+        # ── Fallback: if EV filter removes everything, send best available ──
+        fallback_mode = False
+        if not picks_by_game:
+            print("[main] No picks above EV threshold — retrying in fallback mode (EV ≥ 0%)...")
+            picks_by_game = analyze_player_props(**shared_args, min_ev_threshold=0.0)
+            if picks_by_game:
+                fallback_mode = True
+                total_fb = sum(len(v) for v in picks_by_game.values())
+                print(f"[main] Fallback: {total_fb} picks selected (below normal EV threshold)")
 
         if not picks_by_game:
-            print("[main] No picks with positive EV — notifying Telegram.")
+            print("[main] Truly no picks available — notifying Telegram.")
             await send_telegram_message(
                 "🏀 <b>NBA Daily Dream Bet</b>\n"
-                "Sin picks con EV positivo hoy. El mercado está eficiente."
+                "Sin datos suficientes para generar picks hoy."
             )
             return
 
@@ -162,7 +173,7 @@ async def main():
 
         # ── 11. Format and send ───────────────────────────────────────────────
         print("[main] Formatting and sending message...")
-        message = format_message(picks_by_game, game_times=game_times)
+        message = format_message(picks_by_game, game_times=game_times, fallback_mode=fallback_mode)
         await send_telegram_message(message)
         print("[main] Done.")
 

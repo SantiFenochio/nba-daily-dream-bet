@@ -131,9 +131,11 @@ def analyze_player_props(
     team_context: dict | None = None,
     game_lines: dict | None = None,          # {game_id: {spread, total, home_is_favorite}}
     team_absent_players: dict | None = None,  # {team_abbr: {player_name, ...}}
+    min_ev_threshold: float = MIN_EV_THRESHOLD,  # override for fallback mode
 ) -> dict[str, list["PlayerPick"]]:
     """
     Returns {game_label: [PlayerPick, ...]} sorted by EV, capped at MAX_PICKS_PER_GAME.
+    Pass min_ev_threshold=0.0 to get best-available picks ignoring the EV floor.
     """
     game_by_id = {g["id"]: g for g in games}
     tc  = team_context or {}
@@ -217,6 +219,7 @@ def analyze_player_props(
                 absent_teammates=absent_teammates,
                 game_total=game_total,
                 rest_days=rest_days,
+                min_ev_threshold=min_ev_threshold,
             )
             if pick is None:
                 continue
@@ -274,6 +277,7 @@ def _analyze_one_prop(
     absent_teammates: set | None = None,
     game_total: float | None = None,
     rest_days: int = 2,
+    min_ev_threshold: float = MIN_EV_THRESHOLD,
 ) -> "PlayerPick | None":
 
     # ── Minutes filter ────────────────────────────────────────────────────
@@ -442,7 +446,7 @@ def _analyze_one_prop(
 
     ev_pct = _expected_value_pct(model_prob, price)
 
-    if ev_pct < MIN_EV_THRESHOLD:
+    if ev_pct < min_ev_threshold:
         return None
 
     kelly_pct = _quarter_kelly(model_prob, price)

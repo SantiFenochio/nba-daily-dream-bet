@@ -16,6 +16,7 @@ CONFIDENCE_EMOJI = {
 def format_message(
     picks_by_game: dict[str, list[PlayerPick]],
     game_times: dict[str, str] | None = None,
+    fallback_mode: bool = False,
 ) -> str:
     today = datetime.now(ET).strftime("%d/%m/%Y")
     gt = game_times or {}
@@ -26,9 +27,14 @@ def format_message(
     total_picks = sum(len(v) for v in picks_by_game.values())
 
     # ── SECCIÓN 1: Resumen compacto ──────────────────────────────────────────
+    if fallback_mode:
+        subtitle = f"<i>{total_picks} mejores picks del día — mercado ajustado (EV bajo umbral normal)</i>"
+    else:
+        subtitle = f"<i>{total_picks} picks con EV positivo en {len(picks_by_game)} partido(s)</i>"
+
     summary_lines = [
         f"🏀 <b>NBA DAILY DREAM BET — {today}</b>",
-        f"<i>{total_picks} picks con EV positivo en {len(picks_by_game)} partido(s)</i>",
+        subtitle,
         "",
     ]
 

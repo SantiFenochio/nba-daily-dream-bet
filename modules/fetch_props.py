@@ -199,6 +199,15 @@ def _fetch_event_props_and_lines(
     try:
         response = requests.get(url, params=params, timeout=15)
         print(f"[fetch_props]   /events/odds HTTP {response.status_code}")
+        # Log remaining API quota so we can see when it's running low
+        remaining = response.headers.get("x-requests-remaining", "?")
+        used      = response.headers.get("x-requests-used", "?")
+        if remaining != "?":
+            remaining_int = int(remaining)
+            if remaining_int <= 50:
+                print(f"[fetch_props]   ⚠️  API quota: {used} usadas, {remaining} restantes — BAJO")
+            else:
+                print(f"[fetch_props]   API quota: {used} usadas, {remaining} restantes")
         response.raise_for_status()
         data = response.json()
         bookmakers = data.get("bookmakers", [])
