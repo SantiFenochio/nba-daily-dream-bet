@@ -13,7 +13,10 @@ CONFIDENCE_EMOJI = {
 }
 
 
-def format_message(picks_by_game: dict[str, list[PlayerPick]]) -> str:
+def format_message(
+    picks_by_game: dict[str, list[PlayerPick]],
+    game_times: dict[str, str] | None = None,
+) -> str:
     today = datetime.now(ET).strftime("%d/%m/%Y")
     lines = [
         f"🏀 <b>NBA DAILY DREAM BET — {today}</b>",
@@ -29,8 +32,14 @@ def format_message(picks_by_game: dict[str, list[PlayerPick]]) -> str:
     lines.append(f"<i>{total_picks} picks con EV positivo en {len(picks_by_game)} partido(s)</i>")
     lines.append("")
 
+    gt = game_times or {}
+
     for game_label, picks in picks_by_game.items():
-        lines.append(f"<b>{_h(game_label)}</b>")
+        hora = gt.get(game_label)
+        game_header = f"<b>{_h(game_label)}</b>"
+        if hora:
+            game_header += f"  <i>🕐 {hora}</i>"
+        lines.append(game_header)
         lines.append("─" * 28)
 
         for pick in picks:
