@@ -6,6 +6,9 @@ on:
     - cron: "0 17 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   send-picks:
     runs-on: ubuntu-latest
@@ -30,3 +33,12 @@ jobs:
           BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_KEY }}
           SPORTSDATA_API_KEY: ${{ secrets.SPORTSDATA_KEY }}
         run: python main.py
+
+      - name: Save picks history to repo
+        run: |
+          git config user.name "NBA Bot [automated]"
+          git config user.email "bot@noreply.github.com"
+          git pull --rebase origin main || true
+          git add data/picks_history.json || true
+          git diff --staged --quiet || git commit -m "chore: picks history $(date +%Y-%m-%d) [skip ci]"
+          git push origin main || true

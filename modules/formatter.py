@@ -18,6 +18,7 @@ def format_message(
     game_times: dict[str, str] | None = None,
     fallback_mode: bool = False,
     parlays: list[dict] | None = None,
+    accuracy: dict | None = None,
 ) -> str:
     today = datetime.now(ET).strftime("%d/%m/%Y")
     gt = game_times or {}
@@ -36,8 +37,26 @@ def format_message(
     summary_lines = [
         f"🏀 <b>NBA DAILY DREAM BET — {today}</b>",
         subtitle,
-        "",
     ]
+
+    # Yesterday's performance line
+    if accuracy:
+        yday = accuracy.get("yesterday")
+        overall = accuracy.get("overall")
+        if yday and yday["total"] > 0:
+            pct = round(yday["rate"] * 100)
+            emoji = "✅" if pct >= 60 else "⚠️" if pct >= 40 else "❌"
+            summary_lines.append(
+                f"{emoji} <i>Ayer: {yday['hits']}/{yday['total']} picks ({pct}%)"
+                + (f" | Histórico: {round(overall['rate']*100)}% ({overall['total']} picks)" if overall and overall["total"] >= 10 else "")
+                + "</i>"
+            )
+        elif overall and overall["total"] >= 10:
+            summary_lines.append(
+                f"<i>Histórico: {round(overall['rate']*100)}% de acierto ({overall['total']} picks resueltos)</i>"
+            )
+
+    summary_lines.append("")
 
     for game_label, picks in picks_by_game.items():
         hora = gt.get(game_label)
@@ -75,18 +94,19 @@ def format_message(
         "Apostá con responsabilidad.</i>"
     )
 
-    # ── SECCIÓN 3: Combinadas recomendadas ───────────────────────────────────
+    # ── SECCIÓN 3: Combinadas recomendadas (ordenadas por prob. descendente) ──
     parlay_lines: list[str] = []
     if parlays:
+        sorted_parlays = sorted(parlays, key=lambda p: p["hit_rate_product"], reverse=True)
         parlay_lines += [
             "",
             "━" * 30,
             "🎰 <b>COMBINADAS RECOMENDADAS</b>",
             "━" * 30,
-            "<i>1 pick por partido — sin correlación intra-partido</i>",
+            "<i>Ordenadas de mayor a menor probabilidad | 1 pick/partido</i>",
             "",
         ]
-        for i, parlay in enumerate(parlays, 1):
+        for i, parlay in enumerate(sorted_parlays, 1):
             name = parlay["name"]
             legs = parlay["legs"]
             joint = parlay["hit_rate_product"]

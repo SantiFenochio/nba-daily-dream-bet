@@ -13,6 +13,10 @@ from modules.fetch_context import get_team_context
 from modules.analyzer import analyze_player_props
 from modules.formatter import format_message
 from modules.parlay_builder import build_parlays
+from modules.history import (
+    load_history, save_history, record_picks,
+    backtest_yesterday, get_calibration_factors,
+)
 from modules.telegram_client import send_telegram_message
 
 load_dotenv()
@@ -89,6 +93,10 @@ async def main():
     print(f"[main] Date (ET): {date_str}")
 
     try:
+        # ── 0. Load picks history + backtest yesterday ────────────────────────
+        print("[main] Loading picks history...")
+        history = load_history()
+
         # ── 1. Today's games ────────────────────────────────────────────────
         print("[main] Fetching today's NBA games...")
         games = get_today_games(date_str)
@@ -137,7 +145,11 @@ async def main():
         # ── 8. Absent teammate cascade (for usage boost) ──────────────────────
         team_absent_players = _build_team_absent_players(injury_statuses, player_logs)
 
-        # ── 9. Analyze ───────────────────────────────────────────────────────
+        # ── 9. Backtest yesterday + compute calibration ───────────────────────
+        history, accuracy = backtest_yesterday(history, player_logs)
+        calibration = get_calibration_factors(accuracy)
+
+        # ── 10. Analyze ──────────────────────────────────────────────────────
         print("[main] Analyzing player props...")
         shared_args = dict(
             prop_records=prop_records,
@@ -148,6 +160,7 @@ async def main():
             team_context=team_context,
             game_lines=game_lines,
             team_absent_players=team_absent_players,
+            market_ev_multipliers=calibration,
         )
         picks_by_game = analyze_player_props(**shared_args)
 
@@ -169,16 +182,26 @@ async def main():
             )
             return
 
-        # ── 10. Game start times in Argentina timezone ────────────────────────
+        # ── 11. Game start times in Argentina timezone ────────────────────────
         game_times = _build_game_times(games)
 
-        # ── 11. Build parlay recommendations ─────────────────────────────────
+        # ── 12. Build parlay recommendations ─────────────────────────────────
         parlays = build_parlays(picks_by_game, n_parlays=5)
         print(f"[main] Parlays built: {len(parlays)}")
 
-        # ── 12. Format and send ───────────────────────────────────────────────
+        # ── 13. Record today's picks in history (hit=None, filled tomorrow) ──
+        history = record_picks(date_str, picks_by_game, history)
+        save_history(history)
+
+        # ── 14. Format and send ───────────────────────────────────────────────
         print("[main] Formatting and sending message...")
-        message = format_message(picks_by_game, game_times=game_times, fallback_mode=fallback_mode, parlays=parlays)
+        message = format_message(
+            picks_by_game,
+            game_times=game_times,
+            fallback_mode=fallback_mode,
+            parlays=parlays,
+            accuracy=accuracy,
+        )
         await send_telegram_message(message)
         print("[main] Done.")
 

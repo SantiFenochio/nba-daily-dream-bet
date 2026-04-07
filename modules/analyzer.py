@@ -177,6 +177,7 @@ def analyze_player_props(
     game_lines: dict | None = None,          # {game_id: {spread, total, home_is_favorite}}
     team_absent_players: dict | None = None,  # {team_abbr: {player_name, ...}}
     min_ev_threshold: float = MIN_EV_THRESHOLD,  # override for fallback mode
+    market_ev_multipliers: dict[str, float] | None = None,  # calibration from history
 ) -> dict[str, list["PlayerPick"]]:
     """
     Returns {game_label: [PlayerPick, ...]} sorted by EV, capped at MAX_PICKS_PER_GAME.
@@ -186,6 +187,7 @@ def analyze_player_props(
     tc  = team_context or {}
     gl  = game_lines or {}
     tap = team_absent_players or {}
+    mev = market_ev_multipliers or {}
 
     today_str = date.today().strftime("%Y-%m-%d")
     league_avg_pace, league_avg_def, league_avg_opp = _calculate_league_averages(tc)
@@ -266,6 +268,7 @@ def analyze_player_props(
                 game_total=game_total,
                 rest_days=rest_days,
                 min_ev_threshold=min_ev_threshold,
+                market_ev_multiplier=mev.get(market_key, 1.0),
             )
             if pick is None:
                 continue
@@ -324,6 +327,7 @@ def _analyze_one_prop(
     game_total: float | None = None,
     rest_days: int = 2,
     min_ev_threshold: float = MIN_EV_THRESHOLD,
+    market_ev_multiplier: float = 1.0,
 ) -> "PlayerPick | None":
 
     # ── Minutes filter (mejora 3) ─────────────────────────────────────────
@@ -521,8 +525,10 @@ def _analyze_one_prop(
     ev_pct = _expected_value_pct(model_prob, price)
 
     # Use market-specific EV threshold (mejora 1) unless caller overrides (fallback mode)
-    effective_ev_threshold = min_ev_threshold if min_ev_threshold != MIN_EV_THRESHOLD else \
+    # Apply calibration multiplier from historical accuracy (market_ev_multiplier)
+    base_threshold = min_ev_threshold if min_ev_threshold != MIN_EV_THRESHOLD else \
         MIN_EV_BY_MARKET.get(market_key, MIN_EV_THRESHOLD)
+    effective_ev_threshold = base_threshold * market_ev_multiplier
     if ev_pct < effective_ev_threshold:
         return None
 
