@@ -17,6 +17,7 @@ def format_message(
     picks_by_game: dict[str, list[PlayerPick]],
     game_times: dict[str, str] | None = None,
     fallback_mode: bool = False,
+    parlays: list[dict] | None = None,
 ) -> str:
     today = datetime.now(ET).strftime("%d/%m/%Y")
     gt = game_times or {}
@@ -74,7 +75,38 @@ def format_message(
         "Apostá con responsabilidad.</i>"
     )
 
-    return "\n".join(summary_lines) + "\n" + "\n".join(detail_lines)
+    # ── SECCIÓN 3: Combinadas recomendadas ───────────────────────────────────
+    parlay_lines: list[str] = []
+    if parlays:
+        parlay_lines += [
+            "",
+            "━" * 30,
+            "🎰 <b>COMBINADAS RECOMENDADAS</b>",
+            "━" * 30,
+            "<i>1 pick por partido — sin correlación intra-partido</i>",
+            "",
+        ]
+        for i, parlay in enumerate(parlays, 1):
+            name = parlay["name"]
+            legs = parlay["legs"]
+            joint = parlay["hit_rate_product"]
+            n_legs = len(legs)
+
+            parlay_lines.append(f"<b>#{i} {_h(name)}</b> ({n_legs} patas | prob. estimada: {joint*100:.0f}%)")
+            for game_label, pick in legs:
+                emoji = CONFIDENCE_EMOJI.get(pick.confidence, "")
+                hit_str = f"{pick.hit_count_l10}/{pick.games_l10}"
+                parlay_lines.append(
+                    f"  {emoji} <b>{_h(pick.player)}</b> — {_h(pick.market)} {pick.side.upper()} {pick.line}"
+                    f"  <code>[{hit_str} L10]</code>"
+                )
+            parlay_lines.append("")
+
+        parlay_lines.append(
+            "<i>⚠️ Las combinadas multiplican riesgos. Apostá montos pequeños.</i>"
+        )
+
+    return "\n".join(summary_lines) + "\n" + "\n".join(detail_lines) + "\n".join(parlay_lines)
 
 
 def _format_pick_detail(pick: PlayerPick) -> list[str]:

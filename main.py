@@ -12,6 +12,7 @@ from modules.fetch_player_stats import get_player_logs, get_injury_statuses
 from modules.fetch_context import get_team_context
 from modules.analyzer import analyze_player_props
 from modules.formatter import format_message
+from modules.parlay_builder import build_parlays
 from modules.telegram_client import send_telegram_message
 
 load_dotenv()
@@ -171,9 +172,13 @@ async def main():
         # ── 10. Game start times in Argentina timezone ────────────────────────
         game_times = _build_game_times(games)
 
-        # ── 11. Format and send ───────────────────────────────────────────────
+        # ── 11. Build parlay recommendations ─────────────────────────────────
+        parlays = build_parlays(picks_by_game, n_parlays=5)
+        print(f"[main] Parlays built: {len(parlays)}")
+
+        # ── 12. Format and send ───────────────────────────────────────────────
         print("[main] Formatting and sending message...")
-        message = format_message(picks_by_game, game_times=game_times, fallback_mode=fallback_mode)
+        message = format_message(picks_by_game, game_times=game_times, fallback_mode=fallback_mode, parlays=parlays)
         await send_telegram_message(message)
         print("[main] Done.")
 
