@@ -1,155 +1,233 @@
+"""
+fetch_player_stats.py — BallDontLie API replacement for nba_api / stats.nba.com
+
+stats.nba.com is blocked on GitHub Actions (cloud provider IPs are rejected).
+This module uses the BallDontLie API instead, which works from cloud runners.
+
+Exported:
+    get_player_logs(player_name, last_n=20) -> list[dict]
+    get_stat_value(game, market_key)        -> float | None
+    parse_minutes(min_val)                  -> float
+    get_injury_statuses(player_names)       -> dict[str, str | None]
+"""
+
+import os
 import time
 import unicodedata
 import requests
 from datetime import date
 
-from nba_api.stats.static import players as nba_players
-from nba_api.stats.endpoints import playergamelogs
+NBA_API_BASE = "https://api.balldontlie.io/v1"
 
-try:
-    from bs4 import BeautifulSoup
-    BS4_AVAILABLE = True
-except ImportError:
-    BS4_AVAILABLE = False
-
-# Maps Odds API market keys to nba_api DataFrame column names
+# Maps Odds API market keys to normalized stat column names (uppercase, like nba_api)
 STAT_COL = {
-    "player_points": "PTS",
-    "player_rebounds": "REB",
-    "player_assists": "AST",
-    "player_threes": "FG3M",
-    "player_steals": "STL",
-    "player_blocks": "BLK",
-    "player_turnovers": "TOV",
-    "player_points_rebounds_assists": "__PRA__",
+    "player_points":                   "PTS",
+    "player_rebounds":                 "REB",
+    "player_assists":                  "AST",
+    "player_threes":                   "FG3M",
+    "player_steals":                   "STL",
+    "player_blocks":                   "BLK",
+    "player_turnovers":                "TOV",
+    "player_points_rebounds_assists":  "__PRA__",
 }
 
 _PLAYER_ID_CACHE: dict[str, int | None] = {}
-_ALL_NBA_PLAYERS: list[dict] = []
+_TEAM_ID_TO_ABBR: dict[int, str]        = {}
 
 
-def _load_nba_players() -> list[dict]:
-    global _ALL_NBA_PLAYERS
-    if not _ALL_NBA_PLAYERS:
-        _ALL_NBA_PLAYERS = nba_players.get_players()
-    return _ALL_NBA_PLAYERS
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _bdl_headers() -> dict:
+    api_key = os.getenv("BALLDONTLIE_API_KEY", "")
+    return {"Authorization": api_key} if api_key else {}
 
 
-def _current_season() -> str:
+def _current_season() -> int:
+    """BallDontLie uses the start year as an integer: 2025 for the 2025-26 season."""
     today = date.today()
-    year = today.year if today.month >= 10 else today.year - 1
-    return f"{year}-{str(year + 1)[-2:]}"
-
-
-def _current_season_type() -> str:
-    """
-    BUG FIX: Detect NBA season phase so we pull the right game logs.
-    - Regular season ends ~April 12
-    - Play-In: ~April 14-17  (nba_api uses "PlayIn" or "Regular Season" for those)
-    - Playoffs: ~April 18 onwards
-    """
-    today = date.today()
-    # Playoffs start around April 18 each year
-    if today.month > 4 or (today.month == 4 and today.day >= 18):
-        return "Playoffs"
-    return "Regular Season"
+    return today.year if today.month >= 10 else today.year - 1
 
 
 def _normalize(text: str) -> str:
-    """Lowercase + strip accents for fuzzy matching (handles Jokić → Jokic etc.)."""
-    return unicodedata.normalize("NFD", text.lower().strip()).encode("ascii", "ignore").decode()
+    """Lowercase + strip accents (handles Jokić → Jokic etc.)."""
+    return (
+        unicodedata.normalize("NFD", text.lower().strip())
+        .encode("ascii", "ignore")
+        .decode()
+    )
 
+
+def _ascii_safe(text: str) -> str:
+    """Replace non-ASCII chars so Windows console (cp1252) doesn't choke."""
+    return unicodedata.normalize("NFD", text).encode("ascii", "replace").decode("ascii")
+
+
+def _load_team_map() -> None:
+    """Populate _TEAM_ID_TO_ABBR once. Used to build MATCHUP strings."""
+    global _TEAM_ID_TO_ABBR
+    if _TEAM_ID_TO_ABBR:
+        return
+    try:
+        resp = requests.get(
+            f"{NBA_API_BASE}/teams",
+            headers=_bdl_headers(),
+            params={"per_page": 35},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        for t in resp.json().get("data", []):
+            _TEAM_ID_TO_ABBR[t["id"]] = t["abbreviation"]
+        print(f"[player_stats] Team map loaded: {len(_TEAM_ID_TO_ABBR)} teams")
+    except Exception as e:
+        print(f"[player_stats] Could not load team map: {e}")
+
+
+# ── Player ID lookup ──────────────────────────────────────────────────────────
 
 def find_player_id(name: str) -> int | None:
     if name in _PLAYER_ID_CACHE:
         return _PLAYER_ID_CACHE[name]
 
-    all_p = _load_nba_players()
     name_norm = _normalize(name)
+    parts     = name_norm.split()
 
-    # 1. Exact normalized match
-    for p in all_p:
-        if _normalize(p["full_name"]) == name_norm:
-            _PLAYER_ID_CACHE[name] = p["id"]
-            return p["id"]
-
-    # 2. All parts present (handles middle names / suffixes)
-    parts = name_norm.split()
-    for p in all_p:
-        full_norm = _normalize(p["full_name"])
-        if all(part in full_norm for part in parts):
-            _PLAYER_ID_CACHE[name] = p["id"]
-            return p["id"]
-
-    # 3. Last name + first initial (e.g. "P. Reed" style mismatches)
-    if len(parts) >= 2:
-        last = parts[-1]
-        first_initial = parts[0][0]
-        for p in all_p:
-            full_norm = _normalize(p["full_name"])
-            full_parts = full_norm.split()
-            if len(full_parts) >= 2 and full_parts[-1] == last and full_parts[0].startswith(first_initial):
-                _PLAYER_ID_CACHE[name] = p["id"]
+    def _match(players: list[dict]) -> int | None:
+        # 1. Exact normalized match
+        for p in players:
+            full = _normalize(f"{p['first_name']} {p['last_name']}")
+            if full == name_norm:
                 return p["id"]
+        # 2. All name parts present (handles middle names / "Jr" suffixes)
+        for p in players:
+            full = _normalize(f"{p['first_name']} {p['last_name']}")
+            if all(part in full for part in parts):
+                return p["id"]
+        # 3. Last + first initial
+        if len(parts) >= 2:
+            last, first_initial = parts[-1], parts[0][0]
+            for p in players:
+                full = _normalize(f"{p['first_name']} {p['last_name']}")
+                fp = full.split()
+                if len(fp) >= 2 and fp[-1] == last and fp[0].startswith(first_initial):
+                    return p["id"]
+        return None
 
+    try:
+        # Primary search: full name
+        resp = requests.get(
+            f"{NBA_API_BASE}/players",
+            headers=_bdl_headers(),
+            params={"search": name, "per_page": 25},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        players = resp.json().get("data", [])
+        pid = _match(players)
+        if pid is not None:
+            _PLAYER_ID_CACHE[name] = pid
+            return pid
+
+        # Fallback: search by last name only
+        if len(parts) >= 2:
+            resp2 = requests.get(
+                f"{NBA_API_BASE}/players",
+                headers=_bdl_headers(),
+                params={"search": parts[-1], "per_page": 25},
+                timeout=10,
+            )
+            resp2.raise_for_status()
+            pid2 = _match(resp2.json().get("data", []))
+            if pid2 is not None:
+                _PLAYER_ID_CACHE[name] = pid2
+                return pid2
+
+    except Exception as e:
+        print(f"[player_stats] Error finding player '{name}': {e}")
+
+    print(f"[player_stats] Not found in BDL: {name}")
     _PLAYER_ID_CACHE[name] = None
     return None
 
 
-def _fetch_game_logs(player_id: int, season: str, season_type: str, last_n: int) -> list[dict]:
-    """Internal: fetch game logs for a specific season type."""
-    try:
-        time.sleep(0.7)  # Respect stats.nba.com rate limit
-        logs = playergamelogs.PlayerGameLogs(
-            player_id_nullable=str(player_id),
-            season_nullable=season,
-            season_type_nullable=season_type,
-            last_n_games_nullable=last_n,
-        )
-        df = logs.get_data_frames()[0]
-        if df.empty:
-            return []
-        df = df.sort_values("GAME_DATE", ascending=False).reset_index(drop=True)
-        return df.to_dict("records")
-    except Exception as e:
-        print(f"[player_stats] ERROR fetching logs ({season_type}): {e}")
-        return []
-
+# ── Game logs ─────────────────────────────────────────────────────────────────
 
 def get_player_logs(player_name: str, last_n: int = 20) -> list[dict]:
     """
-    Fetch the last `last_n` game logs for a player via nba_api.
-    BUG FIX: Detects playoffs automatically. If in playoffs but fewer than
-    5 games, supplements with recent regular season games so the model
-    always has enough data.
+    Fetch the last `last_n` game logs for a player via BallDontLie.
     Returns a list of dicts sorted newest-first, or [] on failure.
+    Field names are normalised to uppercase to match the analyzer's expectations
+    (PTS, REB, AST, FG3M, STL, BLK, TOV, MIN, PF, TEAM_ABBREVIATION,
+     GAME_DATE, GAME_ID, MATCHUP).
     """
     player_id = find_player_id(player_name)
     if not player_id:
-        print(f"[player_stats] Not found in NBA DB: {player_name}")
         return []
 
+    _load_team_map()
     season = _current_season()
-    season_type = _current_season_type()
 
-    records = _fetch_game_logs(player_id, season, season_type, last_n)
+    try:
+        time.sleep(0.2)   # Light rate limiting
+        resp = requests.get(
+            f"{NBA_API_BASE}/stats",
+            headers=_bdl_headers(),
+            params={
+                "player_ids[]": player_id,
+                "seasons[]":    season,
+                "per_page":     100,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        games = resp.json().get("data", [])
+    except Exception as e:
+        print(f"[player_stats] ERROR fetching logs for {player_name}: {e}")
+        return []
 
-    # In playoffs: supplement with regular season data if not enough playoff games
-    if season_type == "Playoffs" and len(records) < 5:
-        print(f"[player_stats] {player_name}: only {len(records)} playoff games — supplementing with regular season")
-        reg_records = _fetch_game_logs(player_id, season, "Regular Season", last_n)
-        existing_ids = {r.get("GAME_ID") for r in records}
-        supplemental = [r for r in reg_records if r.get("GAME_ID") not in existing_ids]
-        records = records + supplemental
+    if not games:
+        print(f"[player_stats] No logs for {player_name} (BDL season {season})")
+        return []
 
-    records = records[:last_n]
+    # Sort newest first
+    games.sort(key=lambda g: g.get("game", {}).get("date", "") or "", reverse=True)
+    games = games[:last_n]
 
-    if records:
-        print(f"[player_stats] {player_name}: {len(records)} games fetched ({season_type})")
-    else:
-        print(f"[player_stats] No logs for {player_name} (season {season}, type {season_type})")
-    return records
+    result = []
+    for g in games:
+        game_obj        = g.get("game", {})
+        team_obj        = g.get("team", {})
+        player_team_id  = team_obj.get("id", 0)
+        home_team_id    = game_obj.get("home_team_id", 0)
+        visitor_team_id = game_obj.get("visitor_team_id", 0)
+        is_home         = player_team_id == home_team_id
+        opp_team_id     = visitor_team_id if is_home else home_team_id
+        team_abbr       = team_obj.get("abbreviation", "") or _TEAM_ID_TO_ABBR.get(player_team_id, "")
+        opp_abbr        = _TEAM_ID_TO_ABBR.get(opp_team_id, "")
 
+        # nba_api-compatible MATCHUP format for location/opponent splits
+        matchup = f"{team_abbr} vs. {opp_abbr}" if is_home else f"{team_abbr} @ {opp_abbr}"
+
+        result.append({
+            "PTS":               int(g.get("pts",      0) or 0),
+            "REB":               int(g.get("reb",      0) or 0),
+            "AST":               int(g.get("ast",      0) or 0),
+            "FG3M":              int(g.get("fg3m",     0) or 0),
+            "STL":               int(g.get("stl",      0) or 0),
+            "BLK":               int(g.get("blk",      0) or 0),
+            "TOV":               int(g.get("turnover", 0) or 0),
+            "MIN":               g.get("min", "0") or "0",
+            "PF":                int(g.get("pf",       0) or 0),
+            "TEAM_ABBREVIATION": team_abbr,
+            "GAME_DATE":         game_obj.get("date", ""),
+            "GAME_ID":           str(game_obj.get("id", "")),
+            "MATCHUP":           matchup,
+        })
+
+    print(f"[player_stats] {player_name}: {len(result)} games (BDL, season {season})")
+    return result
+
+
+# ── Stat extraction (called by analyzer) ──────────────────────────────────────
 
 def get_stat_value(game: dict, market_key: str) -> float | None:
     """Extract the relevant stat from a game log record for a given market."""
@@ -171,7 +249,7 @@ def get_stat_value(game: dict, market_key: str) -> float | None:
 
 
 def parse_minutes(min_val) -> float:
-    """Parse nba_api MIN field which can be float or 'MM:SS' string."""
+    """Parse MIN field which can be float or 'MM:SS' string."""
     if isinstance(min_val, (int, float)):
         return float(min_val)
     if isinstance(min_val, str):
@@ -188,10 +266,16 @@ def parse_minutes(min_val) -> float:
     return 0.0
 
 
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # Injury status — ESPN public API (primary) + Rotowire (fallback)
-# BUG FIX: Rotowire CSS selectors were broken. Now uses ESPN JSON API first.
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+
+try:
+    from bs4 import BeautifulSoup
+    BS4_AVAILABLE = True
+except ImportError:
+    BS4_AVAILABLE = False
+
 
 def get_injury_statuses(player_names: list[str]) -> dict[str, str | None]:
     """
@@ -201,7 +285,6 @@ def get_injury_statuses(player_names: list[str]) -> dict[str, str | None]:
     """
     result: dict[str, str | None] = {n: None for n in player_names}
 
-    # ── Primary: ESPN public API ──────────────────────────────────────────
     try:
         print("[player_stats] Fetching injury report from ESPN API...")
         injured = _fetch_espn_injuries()
@@ -215,7 +298,6 @@ def get_injury_statuses(player_names: list[str]) -> dict[str, str | None]:
     except Exception as e:
         print(f"[player_stats] ESPN injury API error: {e} — trying Rotowire fallback...")
 
-    # ── Fallback: Rotowire ────────────────────────────────────────────────
     if BS4_AVAILABLE:
         try:
             injured = _fetch_rotowire_injuries()
@@ -229,47 +311,26 @@ def get_injury_statuses(player_names: list[str]) -> dict[str, str | None]:
     return result
 
 
-def _ascii_safe(text: str) -> str:
-    """Replace non-ASCII characters so Windows console (cp1252) doesn't choke."""
-    return unicodedata.normalize("NFD", text).encode("ascii", "replace").decode("ascii")
-
-
 def _fetch_espn_injuries() -> dict[str, str]:
-    """
-    ESPN public API — no auth required.
-    Returns {normalized_player_name: status_string}.
-    """
     url = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
-    resp = requests.get(
-        url,
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=10,
-    )
+    resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
     resp.raise_for_status()
     data = resp.json()
 
     injured: dict[str, str] = {}
-
-    # ESPN response: {"injuries": [{"team": {...}, "injuries": [{...}, ...]}, ...]}
-    team_groups = data.get("injuries", [])
-    for group in team_groups:
+    for group in data.get("injuries", []):
         for entry in group.get("injuries", []):
-            athlete = entry.get("athlete", {})
+            athlete  = entry.get("athlete", {})
             raw_name = athlete.get("displayName", "").strip()
             if not raw_name:
                 continue
-
             status = entry.get("status", "").strip()
-            # Skip "Active" — only flag truly limited/out players
-            if not status or status.lower() in ("active", ""):
+            if not status or status.lower() == "active":
                 continue
-
-            # Build description — sanitize to ASCII to avoid Windows encoding errors
-            details = entry.get("details", {})
+            details     = entry.get("details", {})
             injury_type = _ascii_safe(details.get("type", ""))
-            detail_desc  = _ascii_safe(details.get("detail", ""))
+            detail_desc = _ascii_safe(details.get("detail", ""))
             long_comment = _ascii_safe(entry.get("longComment", "")[:80])
-
             if detail_desc:
                 desc = f"{status} - {detail_desc}"
             elif injury_type:
@@ -278,17 +339,12 @@ def _fetch_espn_injuries() -> dict[str, str]:
                 desc = f"{status} - {long_comment}"
             else:
                 desc = status
-
             injured[_normalize(raw_name)] = desc
 
     return injured
 
 
 def _fetch_rotowire_injuries() -> dict[str, str]:
-    """
-    Rotowire fallback — improved multi-selector parsing.
-    Returns {normalized_player_name: status_string}.
-    """
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -305,18 +361,10 @@ def _fetch_rotowire_injuries() -> dict[str, str]:
     )
     resp.raise_for_status()
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup    = BeautifulSoup(resp.text, "html.parser")
     injured: dict[str, str] = {}
 
-    # Try multiple selectors for different Rotowire HTML versions
-    selectors = [
-        "tr.injury-report__row",
-        "tr[class*='injury-report']",
-        "div.lineup__player",
-    ]
-
-    rows = []
-    for sel in selectors:
+    for sel in ["tr.injury-report__row", "tr[class*='injury-report']", "div.lineup__player"]:
         rows = soup.select(sel)
         if rows:
             break
@@ -325,31 +373,26 @@ def _fetch_rotowire_injuries() -> dict[str, str]:
         cells = row.select("td")
         if len(cells) < 4:
             continue
-        raw_name = cells[0].get_text(strip=True)
+        raw_name   = cells[0].get_text(strip=True)
         status_txt = cells[2].get_text(strip=True) if len(cells) > 2 else ""
-        desc_txt = cells[3].get_text(strip=True) if len(cells) > 3 else ""
-
+        desc_txt   = cells[3].get_text(strip=True) if len(cells) > 3 else ""
         if not raw_name or status_txt.lower() in ("active", ""):
             continue
-
         label = f"{status_txt} — {desc_txt}" if desc_txt else status_txt
         injured[_normalize(raw_name)] = label
 
-    # Generic fallback: find any table that looks like an injury report
     if not injured:
         for table in soup.find_all("table"):
             for row in table.find_all("tr"):
-                cells = row.find_all("td")
-                if len(cells) < 3:
-                    continue
-                raw_name = cells[0].get_text(strip=True)
-                # Look for status keywords in any cell
+                cells    = row.find_all("td")
+                raw_name = cells[0].get_text(strip=True) if cells else ""
                 row_text = " ".join(c.get_text(strip=True).lower() for c in cells)
                 if any(kw in row_text for kw in ("questionable", "out", "doubtful", "day-to-day", "gtd")):
                     status_txt = next(
                         (c.get_text(strip=True) for c in cells
-                         if c.get_text(strip=True).lower() in ("questionable", "out", "doubtful", "day-to-day", "gtd")),
-                        "Questionable"
+                         if c.get_text(strip=True).lower() in
+                         ("questionable", "out", "doubtful", "day-to-day", "gtd")),
+                        "Questionable",
                     )
                     if raw_name:
                         injured[_normalize(raw_name)] = status_txt
@@ -363,15 +406,12 @@ def _match_injuries(
     player_names: list[str],
     result: dict[str, str | None],
 ) -> None:
-    """Match injury dict (normalized names) against target player list."""
     for target in player_names:
         target_norm = _normalize(target)
-        # Exact match
         if target_norm in injured:
             result[target] = injured[target_norm]
             print(f"[player_stats] Injury: {target} -> {injured[target_norm]}")
             continue
-        # All name parts present
         parts = target_norm.split()
         for inj_name, inj_status in injured.items():
             if all(p in inj_name for p in parts):
