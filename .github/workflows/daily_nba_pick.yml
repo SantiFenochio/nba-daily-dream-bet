@@ -28,4 +28,5 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_KEY }}
+          SPORTSDATA_API_KEY: ${{ secrets.SPORTSDATA_KEY }}
         run: python main.py

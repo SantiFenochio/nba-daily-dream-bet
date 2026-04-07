@@ -1,51 +1,56 @@
 """
-fetch_player_stats.py — ESPN-based player game logs
+fetch_player_stats.py — SportsData.io batch game-log loader
 
-stats.nba.com is blocked on GitHub Actions (cloud IPs rejected).
-BallDontLie /v1/stats requires a paid tier (free plan = 401).
+WHY THIS EXISTS:
+  - stats.nba.com      → blocks all GitHub Actions (cloud) IPs completely
+  - BallDontLie stats  → requires paid tier (free tier = 401 Unauthorized)
+  - ESPN athlete API   → /athletes?search= endpoint returns 404
 
-This module uses ESPN's public APIs instead, which are accessible from cloud runners.
-- Player ID lookup : site.api.espn.com/apis/site/v2/sports/basketball/nba/athletes
-- Per-game stats   : site.web.api.espn.com/apis/common/v3/sports/basketball/nba/athletes/{id}/gamelog
-- Injuries         : site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries (unchanged)
+SOLUTION:
+  SportsData.io /GameStatsByDate/{date} fetches ALL players' stats for each game
+  date in one call, so we need only ~25-30 API calls total per run (instead of
+  100+ individual calls). The free trial key gives 1 000 requests — ~14 days
+  of daily runs at ~30 calls each.
 
-Exported:
-    get_player_logs(player_name, last_n=20) -> list[dict]
-    get_stat_value(game, market_key)        -> float | None
-    parse_minutes(min_val)                  -> float
-    get_injury_statuses(player_names)       -> dict[str, str | None]
+  SPORTSDATA_API_KEY env var must be set (from GitHub secret SPORTSDATA_KEY).
+
+Exports:
+    get_player_logs(name, last_n=20)  → list[dict]
+    get_stat_value(game, market_key) → float | None
+    parse_minutes(min_val)           → float
+    get_injury_statuses(names)       → dict[str, str | None]
 """
 
 import os
 import time
 import unicodedata
 import requests
-from datetime import date
+from datetime import date, timedelta
 
-# ── ESPN endpoints ────────────────────────────────────────────────────────────
-ESPN_SITE_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
-ESPN_WEB_BASE  = "https://site.web.api.espn.com/apis/common/v3/sports/basketball/nba"
-ESPN_HEADERS   = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+# ── SportsData.io config ──────────────────────────────────────────────────────
+SD_BASE = "https://api.sportsdata.io/v3/nba"
 
-# Maps Odds API market keys to normalised stat column names (uppercase)
+# ── Stat column map (uppercase aliases, same as legacy nba_api format) ────────
 STAT_COL = {
-    "player_points":                   "PTS",
-    "player_rebounds":                 "REB",
-    "player_assists":                  "AST",
-    "player_threes":                   "FG3M",
-    "player_steals":                   "STL",
-    "player_blocks":                   "BLK",
-    "player_turnovers":                "TOV",
-    "player_points_rebounds_assists":  "__PRA__",
+    "player_points":                  "PTS",
+    "player_rebounds":                "REB",
+    "player_assists":                 "AST",
+    "player_threes":                  "FG3M",
+    "player_steals":                  "STL",
+    "player_blocks":                  "BLK",
+    "player_turnovers":               "TOV",
+    "player_points_rebounds_assists": "__PRA__",
 }
 
-_ESPN_ID_CACHE: dict[str, int | None] = {}
+# ── Module-level game-log cache built once per process ────────────────────────
+# Keys: normalised player name  Values: list of game records (newest-first)
+_LOG_CACHE: dict[str, list[dict]] = {}
+_CACHE_READY = False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _normalize(text: str) -> str:
-    """Lowercase + strip accents (handles Jokić → Jokic etc.)."""
     return (
         unicodedata.normalize("NFD", text.lower().strip())
         .encode("ascii", "ignore")
@@ -57,233 +62,174 @@ def _ascii_safe(text: str) -> str:
     return unicodedata.normalize("NFD", text).encode("ascii", "replace").decode("ascii")
 
 
-def _current_season_year() -> int:
-    """Returns the start year of the current NBA season (2025 for 2025-26)."""
-    today = date.today()
-    return today.year if today.month >= 10 else today.year - 1
+def _sd_headers() -> dict:
+    key = os.getenv("SPORTSDATA_API_KEY", "")
+    if not key:
+        return {}
+    return {"Ocp-Apim-Subscription-Key": key}
 
 
-# ── ESPN player ID lookup ─────────────────────────────────────────────────────
-
-def _find_espn_id(name: str) -> int | None:
-    """Search ESPN for the athlete and return their integer ID."""
-    if name in _ESPN_ID_CACHE:
-        return _ESPN_ID_CACHE[name]
-
-    name_norm = _normalize(name)
-    parts     = name_norm.split()
-
-    try:
-        time.sleep(0.15)
-        resp = requests.get(
-            f"{ESPN_SITE_BASE}/athletes",
-            headers=ESPN_HEADERS,
-            params={"limit": 10, "search": name},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        athletes = resp.json().get("athletes", [])
-
-        # Exact normalised match
-        for a in athletes:
-            if _normalize(a.get("displayName", "")) == name_norm:
-                pid = int(a["id"])
-                _ESPN_ID_CACHE[name] = pid
-                return pid
-
-        # All name parts present
-        for a in athletes:
-            full = _normalize(a.get("displayName", ""))
-            if all(p in full for p in parts):
-                pid = int(a["id"])
-                _ESPN_ID_CACHE[name] = pid
-                return pid
-
-        # Last name + first initial fallback
-        if len(parts) >= 2:
-            last, init = parts[-1], parts[0][0]
-            for a in athletes:
-                fp = _normalize(a.get("displayName", "")).split()
-                if len(fp) >= 2 and fp[-1] == last and fp[0].startswith(init):
-                    pid = int(a["id"])
-                    _ESPN_ID_CACHE[name] = pid
-                    return pid
-
-        # First result if any
-        if athletes:
-            pid = int(athletes[0]["id"])
-            _ESPN_ID_CACHE[name] = pid
-            return pid
-
-    except Exception as e:
-        print(f"[player_stats] ESPN player lookup error for '{name}': {e}")
-
-    _ESPN_ID_CACHE[name] = None
-    return None
+def _sd_date(d: date) -> str:
+    """SportsData.io NBA date format: '2026-APR-06'"""
+    return d.strftime("%Y-") + d.strftime("%b").upper() + d.strftime("-%d")
 
 
-# ── ESPN game log parsing ─────────────────────────────────────────────────────
+# ── Cache loader (called once, fetches last N game days in bulk) ─────────────
 
-def _safe_int(val) -> int:
-    try:
-        return int(float(val or 0))
-    except (ValueError, TypeError):
-        return 0
-
-
-def _safe_float(val) -> float:
-    try:
-        return float(val or 0)
-    except (ValueError, TypeError):
-        return 0.0
-
-
-def _parse_espn_gamelog(data: dict, last_n: int) -> list[dict]:
+def _load_cache(max_game_days: int = 28) -> None:
     """
-    Parse ESPN's /gamelog response into normalised game records.
-
-    ESPN returns two parallel lists under different keys depending on the
-    API version: `labels`/`names` for column names and `events` (array of
-    event objects each containing a `stats` array of values).
+    Fetch /GameStatsByDate for each of the last max_game_days days that had
+    NBA games and populate _LOG_CACHE.  Runs once per process.
     """
-    # ── Column names ──────────────────────────────────────────────────────────
-    # ESPN /gamelog returns either {"categories": [{name: ...}, ...]} or
-    # {"labels": ["PTS", "REB", ...]}
-    raw_categories = data.get("categories", [])
-    raw_labels     = data.get("labels", [])
+    global _LOG_CACHE, _CACHE_READY
 
-    col_names: list[str] = []
-    if raw_categories:
-        for cat in raw_categories:
-            if isinstance(cat, dict):
-                col_names.append((cat.get("name") or cat.get("abbreviation") or "").lower())
-            else:
-                col_names.append(str(cat).lower())
-    elif raw_labels:
-        col_names = [str(lb).lower() for lb in raw_labels]
+    if _CACHE_READY:
+        return
 
-    def _find_val(stats: list, *candidates) -> float:
-        for c in candidates:
-            if c in col_names:
-                idx = col_names.index(c)
-                if idx < len(stats):
-                    return _safe_float(
-                        stats[idx].get("value") if isinstance(stats[idx], dict) else stats[idx]
-                    )
-        return 0.0
+    key = os.getenv("SPORTSDATA_API_KEY", "")
+    if not key:
+        print("[player_stats] SPORTSDATA_API_KEY not set — no game logs available")
+        _CACHE_READY = True
+        return
 
-    # ── Events (individual games) ─────────────────────────────────────────────
-    events = data.get("events", [])
-    result: list[dict] = []
+    print(f"[player_stats] Loading SportsData.io cache (up to {max_game_days} game days)...")
 
-    for ev in events:
-        stats    = ev.get("stats", [])
-        team_obj = ev.get("team", {}) or {}
-        opp_obj  = (
-            ev.get("opponent", {}) or
-            ev.get("opponentTeam", {}) or
-            {}
-        )
+    today       = date.today()
+    game_days   = 0
+    tmp: dict[str, list[dict]] = {}
 
-        team_abbr = team_obj.get("abbreviation", "") or ""
-        opp_abbr  = opp_obj.get("abbreviation",  "") or ""
+    for days_back in range(1, 55):  # search up to 55 calendar days back
+        if game_days >= max_game_days:
+            break
 
-        home_away = (ev.get("homeAway") or ev.get("home_away") or "").lower()
-        is_home   = home_away in ("home", "vs")
-        matchup   = (
-            f"{team_abbr} vs. {opp_abbr}" if is_home
-            else f"{team_abbr} @ {opp_abbr}"
-        )
+        check = today - timedelta(days=days_back)
+        date_str = _sd_date(check)
 
-        # Date — strip time component if ISO format
-        raw_date = (
-            ev.get("gameDate") or ev.get("date") or
-            ev.get("game", {}).get("date", "") or ""
-        )
-        game_date = raw_date[:10] if "T" in raw_date else raw_date
-
-        # Minutes — ESPN stores as decimal or "MM:SS"
-        min_raw  = _find_val(stats, "min", "minutes")
-        # Convert decimal minutes (e.g. 35.0) → "35:00"
-        if min_raw > 0:
-            mins     = int(min_raw)
-            secs     = int((min_raw - mins) * 60)
-            min_str  = f"{mins}:{secs:02d}"
-        else:
-            min_str = "0:00"
-
-        result.append({
-            "PTS":               _safe_int(_find_val(stats, "pts", "points")),
-            "REB":               _safe_int(_find_val(stats, "reb", "rebounds", "totalrebounds")),
-            "AST":               _safe_int(_find_val(stats, "ast", "assists")),
-            "FG3M":              _safe_int(_find_val(stats, "3pm", "fg3m", "threepointersmade", "3pointsmade")),
-            "STL":               _safe_int(_find_val(stats, "stl", "steals")),
-            "BLK":               _safe_int(_find_val(stats, "blk", "blocks")),
-            "TOV":               _safe_int(_find_val(stats, "to", "tov", "turnovers")),
-            "PF":                _safe_int(_find_val(stats, "pf", "fouls", "personalfouls")),
-            "MIN":               min_str,
-            "TEAM_ABBREVIATION": team_abbr,
-            "GAME_DATE":         game_date,
-            "GAME_ID":           str(ev.get("id", "")),
-            "MATCHUP":           matchup,
-        })
-
-    if not result:
-        return []
-
-    # Sort newest first (most events come oldest-first in ESPN's response)
-    result.sort(key=lambda g: g["GAME_DATE"] or "", reverse=True)
-    return result[:last_n]
-
-
-def _fetch_espn_gamelog(espn_id: int, last_n: int) -> list[dict]:
-    """Try ESPN's /gamelog endpoint (JSON).  Returns [] on any failure."""
-    season = _current_season_year()
-    # Try current season with explicit seasontype=2 (regular season)
-    urls = [
-        f"{ESPN_WEB_BASE}/athletes/{espn_id}/gamelog",
-        f"{ESPN_WEB_BASE}/athletes/{espn_id}/gamelog?season={season}&seasontype=2",
-    ]
-    for url in urls:
         try:
             time.sleep(0.15)
-            resp = requests.get(url, headers=ESPN_HEADERS, timeout=15)
-            if resp.status_code == 404:
-                continue
-            resp.raise_for_status()
-            result = _parse_espn_gamelog(resp.json(), last_n)
-            if result:
-                return result
-        except Exception as e:
-            print(f"[player_stats] ESPN gamelog error (url={url}): {e}")
+            resp = requests.get(
+                f"{SD_BASE}/stats/json/GameStatsByDate/{date_str}",
+                headers=_sd_headers(),
+                timeout=12,
+            )
 
-    return []
+            # 404 / 204 = no games on this date
+            if resp.status_code in (404, 204):
+                continue
+            # 401 / 403 = auth problem — stop immediately
+            if resp.status_code in (401, 403):
+                print(f"[player_stats] SportsData.io auth error {resp.status_code} — check SPORTSDATA_API_KEY")
+                break
+
+            resp.raise_for_status()
+            stats = resp.json()
+            if not isinstance(stats, list) or not stats:
+                continue
+
+            game_days += 1
+            for s in stats:
+                raw_name = (s.get("Name") or "").strip()
+                if not raw_name:
+                    continue
+                rec = _sd_to_record(s, check)
+                # Skip DNP (0 minutes)
+                if parse_minutes(rec["MIN"]) <= 0:
+                    continue
+                tmp.setdefault(_normalize(raw_name), []).append(rec)
+
+        except requests.exceptions.ConnectionError:
+            time.sleep(1)
+            continue
+        except Exception:
+            continue
+
+    # Sort each player newest-first
+    for k in tmp:
+        tmp[k].sort(key=lambda g: g.get("GAME_DATE", ""), reverse=True)
+
+    _LOG_CACHE  = tmp
+    _CACHE_READY = True
+
+    total_players = len(_LOG_CACHE)
+    print(f"[player_stats] Cache ready: {game_days} game days loaded, {total_players} players cached")
+
+
+def _sd_to_record(s: dict, game_date: date) -> dict:
+    """Convert one SportsData.io PlayerGameStats row → internal game record."""
+    team_abbr = (s.get("Team")     or "").upper()
+    opp_abbr  = (s.get("Opponent") or "").upper()
+    home_away = (s.get("HomeOrAway") or "").upper()
+    is_home   = home_away == "HOME"
+    matchup   = (
+        f"{team_abbr} vs. {opp_abbr}" if is_home
+        else f"{team_abbr} @ {opp_abbr}"
+    )
+
+    # Minutes can arrive as "35:20" string or decimal float
+    min_raw = s.get("Minutes") or "0"
+
+    return {
+        "PTS":               float(s.get("Points")            or 0),
+        "REB":               float(s.get("Rebounds")          or 0),
+        "AST":               float(s.get("Assists")           or 0),
+        "FG3M":              float(s.get("ThreePointersMade") or 0),
+        "STL":               float(s.get("Steals")            or 0),
+        "BLK":               float(s.get("BlockedShots")      or 0),
+        "TOV":               float(s.get("TurnOvers")         or 0),
+        "PF":                float(s.get("PersonalFouls")     or 0),
+        "MIN":               str(min_raw),
+        "TEAM_ABBREVIATION": team_abbr,
+        "GAME_DATE":         game_date.isoformat(),
+        "GAME_ID":           str(s.get("GameID") or s.get("StatID") or ""),
+        "MATCHUP":           matchup,
+    }
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def get_player_logs(player_name: str, last_n: int = 20) -> list[dict]:
     """
-    Fetch the last `last_n` game logs for a player via ESPN's public API.
-    Returns a list of dicts sorted newest-first, or [] on failure.
+    Return the last `last_n` game records for `player_name` from the
+    SportsData.io cache.  Cache is built on first call.
     """
-    espn_id = _find_espn_id(player_name)
-    if espn_id is None:
-        print(f"[player_stats] Not found on ESPN: {player_name}")
+    _load_cache()
+
+    if not _LOG_CACHE:
         return []
 
-    result = _fetch_espn_gamelog(espn_id, last_n)
-    if result:
-        print(f"[player_stats] {player_name}: {len(result)} games (ESPN, id={espn_id})")
-    else:
-        print(f"[player_stats] No game logs for {player_name} (ESPN id={espn_id})")
-    return result
+    name_norm = _normalize(player_name)
+    parts     = name_norm.split()
+
+    # 1. Exact normalised match
+    if name_norm in _LOG_CACHE:
+        logs = _LOG_CACHE[name_norm][:last_n]
+        print(f"[player_stats] {player_name}: {len(logs)} games (SportsData.io)")
+        return logs
+
+    # 2. All name parts present (handles "Jr", middle initials, etc.)
+    for key, logs in _LOG_CACHE.items():
+        if all(p in key for p in parts):
+            result = logs[:last_n]
+            print(f"[player_stats] {player_name} → '{key}': {len(result)} games (SportsData.io)")
+            return result
+
+    # 3. Last name + first initial
+    if len(parts) >= 2:
+        last, init = parts[-1], parts[0][0]
+        for key, logs in _LOG_CACHE.items():
+            kp = key.split()
+            if len(kp) >= 2 and kp[-1] == last and kp[0].startswith(init):
+                result = logs[:last_n]
+                print(f"[player_stats] {player_name} → '{key}': {len(result)} games (SportsData.io)")
+                return result
+
+    print(f"[player_stats] Not found in cache: {player_name}")
+    return []
 
 
-# ── Stat extraction (called by analyzer) ──────────────────────────────────────
+# ── Stat extraction helpers ───────────────────────────────────────────────────
 
 def get_stat_value(game: dict, market_key: str) -> float | None:
-    """Extract the relevant stat from a game log record for a given market."""
     if market_key == "player_points_rebounds_assists":
         return (
             float(game.get("PTS") or 0) +
@@ -302,7 +248,7 @@ def get_stat_value(game: dict, market_key: str) -> float | None:
 
 
 def parse_minutes(min_val) -> float:
-    """Parse MIN field (float or 'MM:SS' string → decimal minutes)."""
+    """Parse MIN: float or 'MM:SS' string → decimal minutes."""
     if isinstance(min_val, (int, float)):
         return float(min_val)
     if isinstance(min_val, str):
@@ -320,7 +266,7 @@ def parse_minutes(min_val) -> float:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Injury status — ESPN public API (primary) + Rotowire (fallback)
+# Injury statuses — ESPN public API (primary) + Rotowire (fallback)
 # ══════════════════════════════════════════════════════════════════════════════
 
 try:
@@ -329,82 +275,62 @@ try:
 except ImportError:
     BS4_AVAILABLE = False
 
+ESPN_SITE_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
+ESPN_HEADERS   = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+
 
 def get_injury_statuses(player_names: list[str]) -> dict[str, str | None]:
-    """
-    Returns {player_name: injury_description_or_None}.
-    Primary: ESPN public API.  Fallback: Rotowire scraper.
-    """
     result: dict[str, str | None] = {n: None for n in player_names}
-
     try:
         print("[player_stats] Fetching injury report from ESPN API...")
         injured = _fetch_espn_injuries()
         if injured:
             _match_injuries(injured, player_names, result)
-            injured_count = sum(1 for v in result.values() if v)
-            print(f"[player_stats] ESPN: {injured_count} of {len(player_names)} players flagged")
+            print(f"[player_stats] ESPN: {sum(1 for v in result.values() if v)} of {len(player_names)} players flagged")
             return result
-        else:
-            print("[player_stats] ESPN returned 0 injuries — trying Rotowire fallback...")
+        print("[player_stats] ESPN returned 0 injuries — trying Rotowire...")
     except Exception as e:
-        print(f"[player_stats] ESPN injury API error: {e} — trying Rotowire fallback...")
+        print(f"[player_stats] ESPN injury error: {e} — trying Rotowire...")
 
     if BS4_AVAILABLE:
         try:
             injured = _fetch_rotowire_injuries()
             if injured:
                 _match_injuries(injured, player_names, result)
-                injured_count = sum(1 for v in result.values() if v)
-                print(f"[player_stats] Rotowire: {injured_count} of {len(player_names)} players flagged")
+                print(f"[player_stats] Rotowire: {sum(1 for v in result.values() if v)} flagged")
         except Exception as e:
-            print(f"[player_stats] Rotowire also failed: {e}")
+            print(f"[player_stats] Rotowire failed: {e}")
 
     return result
 
 
 def _fetch_espn_injuries() -> dict[str, str]:
-    url = f"{ESPN_SITE_BASE}/injuries"
-    resp = requests.get(url, headers=ESPN_HEADERS, timeout=10)
+    resp = requests.get(
+        f"{ESPN_SITE_BASE}/injuries",
+        headers=ESPN_HEADERS, timeout=10,
+    )
     resp.raise_for_status()
-    data = resp.json()
-
     injured: dict[str, str] = {}
-    for group in data.get("injuries", []):
+    for group in resp.json().get("injuries", []):
         for entry in group.get("injuries", []):
-            athlete  = entry.get("athlete", {})
-            raw_name = athlete.get("displayName", "").strip()
-            if not raw_name:
+            raw   = (entry.get("athlete", {}).get("displayName") or "").strip()
+            status = (entry.get("status") or "").strip()
+            if not raw or status.lower() == "active":
                 continue
-            status = entry.get("status", "").strip()
-            if not status or status.lower() == "active":
-                continue
-            details      = entry.get("details", {})
-            injury_type  = _ascii_safe(details.get("type", ""))
-            detail_desc  = _ascii_safe(details.get("detail", ""))
-            long_comment = _ascii_safe(entry.get("longComment", "")[:80])
-            if detail_desc:
-                desc = f"{status} - {detail_desc}"
-            elif injury_type:
-                desc = f"{status} - {injury_type}"
-            elif long_comment:
-                desc = f"{status} - {long_comment}"
-            else:
-                desc = status
-            injured[_normalize(raw_name)] = desc
-
+            d    = entry.get("details", {})
+            desc = (
+                f"{status} - {_ascii_safe(d.get('detail',''))}" if d.get("detail")
+                else f"{status} - {_ascii_safe(d.get('type',''))}" if d.get("type")
+                else status
+            )
+            injured[_normalize(raw)] = desc
     return injured
 
 
 def _fetch_rotowire_injuries() -> dict[str, str]:
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept": "text/html,application/xhtml+xml",
     }
     resp = requests.get(
         "https://www.rotowire.com/basketball/injury-report.php",
@@ -414,7 +340,7 @@ def _fetch_rotowire_injuries() -> dict[str, str]:
     soup    = BeautifulSoup(resp.text, "html.parser")
     injured: dict[str, str] = {}
 
-    for sel in ["tr.injury-report__row", "tr[class*='injury-report']", "div.lineup__player"]:
+    for sel in ["tr.injury-report__row", "tr[class*='injury-report']"]:
         rows = soup.select(sel)
         if rows:
             break
@@ -426,41 +352,20 @@ def _fetch_rotowire_injuries() -> dict[str, str]:
         desc_txt   = cells[3].get_text(strip=True) if len(cells) > 3 else ""
         if not raw_name or status_txt.lower() in ("active", ""):
             continue
-        label = f"{status_txt} — {desc_txt}" if desc_txt else status_txt
-        injured[_normalize(raw_name)] = label
+        injured[_normalize(raw_name)] = f"{status_txt} — {desc_txt}" if desc_txt else status_txt
 
-    if not injured:
-        for table in soup.find_all("table"):
-            for row in table.find_all("tr"):
-                cells    = row.find_all("td")
-                raw_name = cells[0].get_text(strip=True) if cells else ""
-                row_text = " ".join(c.get_text(strip=True).lower() for c in cells)
-                if any(kw in row_text for kw in ("questionable", "out", "doubtful", "day-to-day", "gtd")):
-                    status_txt = next(
-                        (c.get_text(strip=True) for c in cells
-                         if c.get_text(strip=True).lower() in
-                         ("questionable", "out", "doubtful", "day-to-day", "gtd")),
-                        "Questionable",
-                    )
-                    if raw_name:
-                        injured[_normalize(raw_name)] = status_txt
-
-    print(f"[player_stats] Rotowire: {len(injured)} injured/questionable found")
+    print(f"[player_stats] Rotowire: {len(injured)} found")
     return injured
 
 
-def _match_injuries(
-    injured: dict[str, str],
-    player_names: list[str],
-    result: dict[str, str | None],
-) -> None:
+def _match_injuries(injured, player_names, result):
     for target in player_names:
-        target_norm = _normalize(target)
-        if target_norm in injured:
-            result[target] = injured[target_norm]
-            print(f"[player_stats] Injury: {target} -> {injured[target_norm]}")
+        norm = _normalize(target)
+        if norm in injured:
+            result[target] = injured[norm]
+            print(f"[player_stats] Injury: {target} -> {injured[norm]}")
             continue
-        parts = target_norm.split()
+        parts = norm.split()
         for inj_name, inj_status in injured.items():
             if all(p in inj_name for p in parts):
                 result[target] = inj_status
