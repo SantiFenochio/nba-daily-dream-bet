@@ -1,18 +1,19 @@
 """
-fetch_player_stats.py — SportsData.io batch game-log loader
+fetch_player_stats.py — ESPN box score batch game-log loader
 
 WHY THIS EXISTS:
   - stats.nba.com      → blocks all GitHub Actions (cloud) IPs completely
-  - BallDontLie stats  → requires paid tier (free tier = 401 Unauthorized)
-  - ESPN athlete API   → /athletes?search= endpoint returns 404
+  - BallDontLie /stats → requires paid tier (free tier = 401 Unauthorized)
+  - SportsData.io free → sandbox-only (2019-20 data), no current season data
+  - ESPN athlete search → /athletes?search= endpoint returns 404
 
 SOLUTION:
-  SportsData.io /GameStatsByDate/{date} fetches ALL players' stats for each game
-  date in one call, so we need only ~25-30 API calls total per run (instead of
-  100+ individual calls). The free trial key gives 1 000 requests — ~14 days
-  of daily runs at ~30 calls each.
+  ESPN public APIs require no auth and are accessible from GitHub Actions:
+  1. ESPN scoreboard /scoreboard?dates=YYYYMMDD → game IDs + team context
+  2. ESPN /summary?event=GAMEID → full box score for ALL players in a game
 
-  SPORTSDATA_API_KEY env var must be set (from GitHub secret SPORTSDATA_KEY).
+  ~28 scoreboard calls + ~100 summary calls = ~130 total API calls per run.
+  Each call is throttled to 0.15-0.20s apart.
 
 Exports:
     get_player_logs(name, last_n=20)  → list[dict]
@@ -21,16 +22,16 @@ Exports:
     get_injury_statuses(names)       → dict[str, str | None]
 """
 
-import os
 import time
 import unicodedata
 import requests
 from datetime import date, timedelta
 
-# ── SportsData.io config ──────────────────────────────────────────────────────
-SD_BASE = "https://api.sportsdata.io/v3/nba"
+# ── ESPN API config ───────────────────────────────────────────────────────────
+ESPN_SITE = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
+ESPN_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
 
-# ── Stat column map (uppercase aliases, same as legacy nba_api format) ────────
+# ── Stat column map (market_key → internal field name) ────────────────────────
 STAT_COL = {
     "player_points":                  "PTS",
     "player_rebounds":                "REB",
@@ -62,40 +63,53 @@ def _ascii_safe(text: str) -> str:
     return unicodedata.normalize("NFD", text).encode("ascii", "replace").decode("ascii")
 
 
-def _sd_headers() -> dict:
-    key = os.getenv("SPORTSDATA_API_KEY", "")
-    if not key:
-        return {}
-    return {"Ocp-Apim-Subscription-Key": key}
+def _safe_float(val, default: float = 0.0) -> float:
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
 
 
-def _sd_date(d: date) -> str:
-    """SportsData.io NBA date format: '2026-APR-06'"""
-    return d.strftime("%Y-") + d.strftime("%b").upper() + d.strftime("-%d")
+def _parse_made(val: str) -> float:
+    """Parse 'made-attempted' string → float(made). E.g. '4-10' → 4.0"""
+    if isinstance(val, str) and "-" in val:
+        try:
+            return float(val.split("-")[0])
+        except ValueError:
+            pass
+    return _safe_float(val)
 
 
-# ── Cache loader (called once, fetches last N game days in bulk) ─────────────
+def _get_stat(labels: list, stats: list, label: str) -> str:
+    """Look up a stat value by its column label."""
+    try:
+        idx = labels.index(label)
+        return stats[idx] if idx < len(stats) else "0"
+    except ValueError:
+        return "0"
+
+
+def _espn_date(d: date) -> str:
+    """ESPN scoreboard date format: '20260406'"""
+    return d.strftime("%Y%m%d")
+
+
+# ── Cache loader (called once, fetches last N game days via ESPN) ─────────────
 
 def _load_cache(max_game_days: int = 28) -> None:
     """
-    Fetch /GameStatsByDate for each of the last max_game_days days that had
-    NBA games and populate _LOG_CACHE.  Runs once per process.
+    Fetch ESPN scoreboard + game summaries for each of the last max_game_days
+    days that had NBA games, then populate _LOG_CACHE.  Runs once per process.
     """
     global _LOG_CACHE, _CACHE_READY
 
     if _CACHE_READY:
         return
 
-    key = os.getenv("SPORTSDATA_API_KEY", "")
-    if not key:
-        print("[player_stats] SPORTSDATA_API_KEY not set — no game logs available")
-        _CACHE_READY = True
-        return
+    print(f"[player_stats] Loading ESPN box score cache (up to {max_game_days} game days)...")
 
-    print(f"[player_stats] Loading SportsData.io cache (up to {max_game_days} game days)...")
-
-    today       = date.today()
-    game_days   = 0
+    today = date.today()
+    game_days = 0
     tmp: dict[str, list[dict]] = {}
 
     for days_back in range(1, 55):  # search up to 55 calendar days back
@@ -103,39 +117,107 @@ def _load_cache(max_game_days: int = 28) -> None:
             break
 
         check = today - timedelta(days=days_back)
-        date_str = _sd_date(check)
+        date_str = _espn_date(check)
 
         try:
-            time.sleep(0.15)
-            resp = requests.get(
-                f"{SD_BASE}/stats/json/GameStatsByDate/{date_str}",
-                headers=_sd_headers(),
+            time.sleep(0.2)
+            # Step 1: get game IDs for this date
+            r = requests.get(
+                f"{ESPN_SITE}/scoreboard",
+                headers=ESPN_HEADERS,
+                params={"dates": date_str},
                 timeout=12,
             )
-
-            # 404 / 204 = no games on this date
-            if resp.status_code in (404, 204):
+            if r.status_code != 200:
                 continue
-            # 401 / 403 = auth problem — stop immediately
-            if resp.status_code in (401, 403):
-                print(f"[player_stats] SportsData.io auth error {resp.status_code} — check SPORTSDATA_API_KEY")
-                break
 
-            resp.raise_for_status()
-            stats = resp.json()
-            if not isinstance(stats, list) or not stats:
-                continue
+            events = r.json().get("events", [])
+            if not events:
+                continue  # no games this date
+
+            # Build game context: {game_id: {date, home_abbr, away_abbr}}
+            game_ctx: dict[str, dict] = {}
+            for evt in events:
+                gid = evt.get("id", "")
+                if not gid:
+                    continue
+                comp = evt.get("competitions", [{}])[0]
+                teams: dict[str, str] = {}
+                for comp_team in comp.get("competitors", []):
+                    ha = comp_team.get("homeAway", "")
+                    abbr = comp_team.get("team", {}).get("abbreviation", "").upper()
+                    if ha and abbr:
+                        teams[ha] = abbr
+                game_ctx[gid] = {
+                    "date":  check,
+                    "home":  teams.get("home", ""),
+                    "away":  teams.get("away", ""),
+                }
 
             game_days += 1
-            for s in stats:
-                raw_name = (s.get("Name") or "").strip()
-                if not raw_name:
+
+            # Step 2: for each game, fetch box score
+            for gid, ctx in game_ctx.items():
+                time.sleep(0.15)
+                try:
+                    sr = requests.get(
+                        f"{ESPN_SITE}/summary",
+                        headers=ESPN_HEADERS,
+                        params={"event": gid},
+                        timeout=12,
+                    )
+                    if sr.status_code != 200:
+                        continue
+
+                    boxscore = sr.json().get("boxscore", {})
+                    for team_data in boxscore.get("players", []):
+                        team_abbr = team_data.get("team", {}).get("abbreviation", "").upper()
+                        opp_abbr  = ctx["away"] if team_abbr == ctx["home"] else ctx["home"]
+                        is_home   = (team_abbr == ctx["home"])
+                        matchup   = (
+                            f"{team_abbr} vs. {opp_abbr}" if is_home
+                            else f"{team_abbr} @ {opp_abbr}"
+                        )
+
+                        for stat_group in team_data.get("statistics", []):
+                            labels = stat_group.get("labels", [])
+                            for athlete_data in stat_group.get("athletes", []):
+                                # Skip DNP players
+                                if athlete_data.get("didNotPlay", False):
+                                    continue
+                                stats_arr = athlete_data.get("stats", [])
+                                if not stats_arr:
+                                    continue
+
+                                name = (
+                                    athlete_data.get("athlete", {}).get("displayName") or ""
+                                ).strip()
+                                if not name:
+                                    continue
+
+                                min_str = _get_stat(labels, stats_arr, "MIN")
+                                if parse_minutes(min_str) <= 0:
+                                    continue
+
+                                rec = {
+                                    "PTS":  _safe_float(_get_stat(labels, stats_arr, "PTS")),
+                                    "REB":  _safe_float(_get_stat(labels, stats_arr, "REB")),
+                                    "AST":  _safe_float(_get_stat(labels, stats_arr, "AST")),
+                                    "FG3M": _parse_made(_get_stat(labels, stats_arr, "3PT")),
+                                    "STL":  _safe_float(_get_stat(labels, stats_arr, "STL")),
+                                    "BLK":  _safe_float(_get_stat(labels, stats_arr, "BLK")),
+                                    "TOV":  _safe_float(_get_stat(labels, stats_arr, "TO")),
+                                    "PF":   _safe_float(_get_stat(labels, stats_arr, "PF")),
+                                    "MIN":  min_str,
+                                    "TEAM_ABBREVIATION": team_abbr,
+                                    "GAME_DATE": ctx["date"].isoformat(),
+                                    "GAME_ID":   str(gid),
+                                    "MATCHUP":   matchup,
+                                }
+                                tmp.setdefault(_normalize(name), []).append(rec)
+
+                except Exception:
                     continue
-                rec = _sd_to_record(s, check)
-                # Skip DNP (0 minutes)
-                if parse_minutes(rec["MIN"]) <= 0:
-                    continue
-                tmp.setdefault(_normalize(raw_name), []).append(rec)
 
         except requests.exceptions.ConnectionError:
             time.sleep(1)
@@ -154,43 +236,12 @@ def _load_cache(max_game_days: int = 28) -> None:
     print(f"[player_stats] Cache ready: {game_days} game days loaded, {total_players} players cached")
 
 
-def _sd_to_record(s: dict, game_date: date) -> dict:
-    """Convert one SportsData.io PlayerGameStats row → internal game record."""
-    team_abbr = (s.get("Team")     or "").upper()
-    opp_abbr  = (s.get("Opponent") or "").upper()
-    home_away = (s.get("HomeOrAway") or "").upper()
-    is_home   = home_away == "HOME"
-    matchup   = (
-        f"{team_abbr} vs. {opp_abbr}" if is_home
-        else f"{team_abbr} @ {opp_abbr}"
-    )
-
-    # Minutes can arrive as "35:20" string or decimal float
-    min_raw = s.get("Minutes") or "0"
-
-    return {
-        "PTS":               float(s.get("Points")            or 0),
-        "REB":               float(s.get("Rebounds")          or 0),
-        "AST":               float(s.get("Assists")           or 0),
-        "FG3M":              float(s.get("ThreePointersMade") or 0),
-        "STL":               float(s.get("Steals")            or 0),
-        "BLK":               float(s.get("BlockedShots")      or 0),
-        "TOV":               float(s.get("TurnOvers")         or 0),
-        "PF":                float(s.get("PersonalFouls")     or 0),
-        "MIN":               str(min_raw),
-        "TEAM_ABBREVIATION": team_abbr,
-        "GAME_DATE":         game_date.isoformat(),
-        "GAME_ID":           str(s.get("GameID") or s.get("StatID") or ""),
-        "MATCHUP":           matchup,
-    }
-
-
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def get_player_logs(player_name: str, last_n: int = 20) -> list[dict]:
     """
     Return the last `last_n` game records for `player_name` from the
-    SportsData.io cache.  Cache is built on first call.
+    ESPN box score cache.  Cache is built on first call.
     """
     _load_cache()
 
@@ -203,14 +254,14 @@ def get_player_logs(player_name: str, last_n: int = 20) -> list[dict]:
     # 1. Exact normalised match
     if name_norm in _LOG_CACHE:
         logs = _LOG_CACHE[name_norm][:last_n]
-        print(f"[player_stats] {player_name}: {len(logs)} games (SportsData.io)")
+        print(f"[player_stats] {player_name}: {len(logs)} games (ESPN)")
         return logs
 
     # 2. All name parts present (handles "Jr", middle initials, etc.)
     for key, logs in _LOG_CACHE.items():
         if all(p in key for p in parts):
             result = logs[:last_n]
-            print(f"[player_stats] {player_name} → '{key}': {len(result)} games (SportsData.io)")
+            print(f"[player_stats] {player_name} → '{key}': {len(result)} games (ESPN)")
             return result
 
     # 3. Last name + first initial
@@ -220,7 +271,7 @@ def get_player_logs(player_name: str, last_n: int = 20) -> list[dict]:
             kp = key.split()
             if len(kp) >= 2 and kp[-1] == last and kp[0].startswith(init):
                 result = logs[:last_n]
-                print(f"[player_stats] {player_name} → '{key}': {len(result)} games (SportsData.io)")
+                print(f"[player_stats] {player_name} → '{key}': {len(result)} games (ESPN)")
                 return result
 
     print(f"[player_stats] Not found in cache: {player_name}")
@@ -276,7 +327,6 @@ except ImportError:
     BS4_AVAILABLE = False
 
 ESPN_SITE_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
-ESPN_HEADERS   = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
 
 
 def get_injury_statuses(player_names: list[str]) -> dict[str, str | None]:
@@ -340,6 +390,7 @@ def _fetch_rotowire_injuries() -> dict[str, str]:
     soup    = BeautifulSoup(resp.text, "html.parser")
     injured: dict[str, str] = {}
 
+    rows = []
     for sel in ["tr.injury-report__row", "tr[class*='injury-report']"]:
         rows = soup.select(sel)
         if rows:
