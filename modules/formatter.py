@@ -94,27 +94,55 @@ def format_message(
         "Apostá con responsabilidad.</i>"
     )
 
-    # ── SECCIÓN 3: Combinadas recomendadas (ordenadas por prob. descendente) ──
+    # ── SECCIÓN 3: Combinadas recomendadas ────────────────────────────────────
+    # Ordenadas por prob. conjunta realista (corr_joint_prob) si está disponible,
+    # con fallback a hit_rate_product para compatibilidad con versiones anteriores.
     parlay_lines: list[str] = []
     if parlays:
-        sorted_parlays = sorted(parlays, key=lambda p: p["hit_rate_product"], reverse=True)
+        sorted_parlays = sorted(
+            parlays,
+            key=lambda p: p.get("corr_joint_prob", p["hit_rate_product"]),
+            reverse=True,
+        )
         parlay_lines += [
             "",
             "━" * 30,
             "🎰 <b>COMBINADAS RECOMENDADAS</b>",
             "━" * 30,
-            "<i>Ordenadas de mayor a menor probabilidad | 1 pick/partido</i>",
+            "<i>Prob. con correlaciones (Monte Carlo) | 1 pick/partido</i>",
             "",
         ]
         for i, parlay in enumerate(sorted_parlays, 1):
-            name = parlay["name"]
-            legs = parlay["legs"]
-            joint = parlay["hit_rate_product"]
+            name   = parlay["name"]
+            legs   = parlay["legs"]
             n_legs = len(legs)
 
-            parlay_lines.append(f"<b>#{i} {_h(name)}</b> ({n_legs} patas | prob. estimada: {joint*100:.0f}%)")
+            # Preferir probabilidad realista; fallback a naïve si el builder es v1
+            corr_prob  = parlay.get("corr_joint_prob", parlay["hit_rate_product"])
+            naive_prob = parlay["hit_rate_product"]
+            ev_pct     = parlay.get("parlay_ev_pct")
+
+            # Línea de cabecera con prob. realista + EV si disponible
+            ev_str = ""
+            if ev_pct is not None:
+                ev_sign = "+" if ev_pct >= 0 else ""
+                ev_str  = f" | EV: <b>{ev_sign}{ev_pct:.1f}%</b>"
+
+            parlay_lines.append(
+                f"<b>#{i} {_h(name)}</b> ({n_legs} patas){ev_str}"
+            )
+            # Prob. conjunta realista en línea propia (más legible en Telegram)
+            parlay_lines.append(
+                f"  📊 Prob. conjunta: <b>{corr_prob * 100:.1f}%</b>"
+                + (
+                    f"  <i>(naïve: {naive_prob * 100:.0f}%)</i>"
+                    if abs(corr_prob - naive_prob) >= 0.005  # solo mostrar si hay diferencia >0.5pp
+                    else ""
+                )
+            )
+
             for game_label, pick in legs:
-                emoji = CONFIDENCE_EMOJI.get(pick.confidence, "")
+                emoji   = CONFIDENCE_EMOJI.get(pick.confidence, "")
                 hit_str = f"{pick.hit_count_l10}/{pick.games_l10}"
                 parlay_lines.append(
                     f"  {emoji} <b>{_h(pick.player)}</b> — {_h(pick.market)} {pick.side.upper()} {pick.line}"
