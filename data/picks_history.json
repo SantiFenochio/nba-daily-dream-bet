@@ -118,7 +118,7 @@
       "model_prob": 0.6706,
       "confidence": "Alta",
       "game": "Minnesota Timberwolves @ Indiana Pacers",
-      "hit": null
+      "hit": false
     },
     {
       "player": "Naz Reid",
@@ -130,7 +130,7 @@
       "model_prob": 0.8027,
       "confidence": "Alta",
       "game": "Minnesota Timberwolves @ Indiana Pacers",
-      "hit": null
+      "hit": true
     },
     {
       "player": "Julius Randle",
@@ -142,7 +142,7 @@
       "model_prob": 0.6715,
       "confidence": "Media",
       "game": "Minnesota Timberwolves @ Indiana Pacers",
-      "hit": null
+      "hit": true
     },
     {
       "player": "Kevin Durant",
@@ -238,6 +238,248 @@
       "model_prob": 0.5895,
       "confidence": "Alta",
       "game": "Chicago Bulls @ Washington Wizards",
+      "hit": null
+    }
+  ],
+  "2026-04-08": [
+    {
+      "player": "De'Aaron Fox",
+      "market": "Puntos",
+      "market_key": "player_points",
+      "side": "Under",
+      "line": 17.5,
+      "ev_pct": 109.62,
+      "model_prob": 0.6987,
+      "confidence": "Alta",
+      "game": "Portland Trail Blazers @ San Antonio Spurs",
+      "hit": null
+    },
+    {
+      "player": "De'Aaron Fox",
+      "market": "PRA",
+      "market_key": "player_points_rebounds_assists",
+      "side": "Under",
+      "line": 28.5,
+      "ev_pct": 86.06,
+      "model_prob": 0.7594,
+      "confidence": "Alta",
+      "game": "Portland Trail Blazers @ San Antonio Spurs",
+      "hit": null
+    },
+    {
+      "player": "Dylan Harper",
+      "market": "PRA",
+      "market_key": "player_points_rebounds_assists",
+      "side": "Under",
+      "line": 25.5,
+      "ev_pct": 55.61,
+      "model_prob": 0.6622,
+      "confidence": "Alta",
+      "game": "Portland Trail Blazers @ San Antonio Spurs",
+      "hit": null
+    },
+    {
+      "player": "Sam Merrill",
+      "market": "Puntos",
+      "market_key": "player_points",
+      "side": "Over",
+      "line": 12.5,
+      "ev_pct": 88.14,
+      "model_prob": 0.6271,
+      "confidence": "Alta",
+      "game": "Atlanta Hawks @ Cleveland Cavaliers",
+      "hit": null
+    },
+    {
+      "player": "Max Strus",
+      "market": "Rebotes",
+      "market_key": "player_rebounds",
+      "side": "Over",
+      "line": 5.5,
+      "ev_pct": 40.05,
+      "model_prob": 0.5602,
+      "confidence": "Alta",
+      "game": "Atlanta Hawks @ Cleveland Cavaliers",
+      "hit": null
+    },
+    {
+      "player": "Jonathan Kuminga",
+      "market": "PRA",
+      "market_key": "player_points_rebounds_assists",
+      "side": "Under",
+      "line": 16.5,
+      "ev_pct": 28.97,
+      "model_prob": 0.6756,
+      "confidence": "Alta",
+      "game": "Atlanta Hawks @ Cleveland Cavaliers",
+      "hit": null
+    },
+    {
+      "player": "C.J. McCollum",
+      "market": "Asistencias",
+      "market_key": "player_assists",
+      "side": "Over",
+      "line": 4.5,
+      "ev_pct": 29.25,
+      "model_prob": 0.6012,
+      "confidence": "Alta",
+      "game": "Atlanta Hawks @ Cleveland Cavaliers",
+      "hit": null
+    },
+    {
+      "player": "Jalen Johnson",
+      "market": "Triples",
+      "market_key": "player_threes",
+      "side": "Over",
+      "line": 1.5,
+      "ev_pct": 23.69,
+      "model_prob": 0.6184,
+      "confidence": "Alta",
+      "game": "Atlanta Hawks @ Cleveland Cavaliers",
+      "hit": null
+    },
+    {
+      "player": "Tristan da Silva",
+      "market": "Puntos",
+      "market_key": "player_points",
+      "side": "Over",
+      "line": 10.5,
+      "ev_pct": 59.29,
+      "model_prob": 0.6372,
+      "confidence": "Alta",
+      "game": "Minnesota Timberwolves @ Orlando Magic",
+      "hit": null
+    },
+    {
+      "player": "Tristan da Silva",
+      "market": "PRA",
+      "market_key": "player_points_rebounds_assists",
+      "side": "Over",
+      "line": 13.5,
+      "ev_pct": 45.69,
+      "model_prob": 0.7631,
+      "confidence": "Alta",
+      "game": "Minnesota Timberwolves @ Orlando Magic",
+      "hit": null
+    },
+    {
+      "player": "Naz Reid",
+      "market": "PRA",
+      "market_key": "player_points_rebounds_assists",
+      "side": "Under",
+      "line": 21.5,
+      "ev_pct": 39.44,
+      "model_prob": 0.7304,
+      "confidence": "Alta",
+      "game": "Minnesota Timberwolves @ Orlando Magic",
+      "hit": null
+    },
+    {
+      "player": "Julius Randle",
+      "market": "PRA",
+      "market_key": "player_points_rebounds_assists",
+      "side": "Under",
+      "line": 31.5,
+      "ev_pct": 46.11,
+      "model_prob": 0.6494,
+      "confidence": "Alta",
+      "game": "Minnesota Timberwolves @ Orlando Magic",
+      "hit": null
+    },
+    {
+      "player": "Jalen Suggs",
+      "market": "Asistencias",
+      "market_key": "player_assists",
+      "side": "Over",
+      "line": 7.5,
+      "ev_pct": 52.5,
+      "model_prob": 0.5083,
+      "confidence": "Baja",
+      "game": "Minnesota Timberwolves @ Orlando Magic",
+      "hit": null
+    },
+    {
+      "player": "Wendell Carter Jr",
+      "market": "Rebotes",
+      "market_key": "player_rebounds",
+      "side": "Under",
+      "line": 6.5,
+      "ev_pct": 29.48,
+      "model_prob": 0.5285,
+      "confidence": "Alta",
+      "game": "Minnesota Timberwolves @ Orlando Magic",
+      "hit": null
+    },
+    {
+      "player": "Duncan Robinson",
+      "market": "Puntos",
+      "market_key": "player_points",
+      "side": "Over",
+      "line": 9.5,
+      "ev_pct": 42.61,
+      "model_prob": 0.7837,
+      "confidence": "Alta",
+      "game": "Milwaukee Bucks @ Detroit Pistons",
+      "hit": null
+    },
+    {
+      "player": "Ryan Rollins",
+      "market": "Triples",
+      "market_key": "player_threes",
+      "side": "Over",
+      "line": 2.5,
+      "ev_pct": 38.25,
+      "model_prob": 0.6342,
+      "confidence": "Alta",
+      "game": "Milwaukee Bucks @ Detroit Pistons",
+      "hit": null
+    },
+    {
+      "player": "Duncan Robinson",
+      "market": "Triples",
+      "market_key": "player_threes",
+      "side": "Over",
+      "line": 2.5,
+      "ev_pct": 38.17,
+      "model_prob": 0.606,
+      "confidence": "Media",
+      "game": "Milwaukee Bucks @ Detroit Pistons",
+      "hit": null
+    },
+    {
+      "player": "Tobias Harris",
+      "market": "Asistencias",
+      "market_key": "player_assists",
+      "side": "Over",
+      "line": 2.5,
+      "ev_pct": 21.08,
+      "model_prob": 0.6774,
+      "confidence": "Alta",
+      "game": "Milwaukee Bucks @ Detroit Pistons",
+      "hit": null
+    },
+    {
+      "player": "Ryan Rollins",
+      "market": "Puntos",
+      "market_key": "player_points",
+      "side": "Over",
+      "line": 17.5,
+      "ev_pct": 25.6,
+      "model_prob": 0.6691,
+      "confidence": "Alta",
+      "game": "Milwaukee Bucks @ Detroit Pistons",
+      "hit": null
+    },
+    {
+      "player": "Cooper Flagg",
+      "market": "Robos",
+      "market_key": "player_steals",
+      "side": "Over",
+      "line": 1.5,
+      "ev_pct": 31.83,
+      "model_prob": 0.5425,
+      "confidence": "Alta",
+      "game": "Dallas Mavericks @ Phoenix Suns",
       "hit": null
     }
   ]
