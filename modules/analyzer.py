@@ -54,6 +54,7 @@ class PlayerPick:
 
     # Compatibility with history.py (not computed in simple mode)
     ev_pct: float = 0.0
+    model_prob: float = 0.0
 
 
 def _compute_stats(logs: list[dict], market_key: str, line: float) -> dict | None:

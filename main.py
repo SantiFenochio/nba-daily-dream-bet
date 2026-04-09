@@ -1,7 +1,9 @@
 import asyncio
+import json
 import os
 import traceback
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -143,6 +145,18 @@ async def main():
         # ── 7. Injury statuses via ESPN API ──────────────────────────────────
         print("[main] Checking injury statuses (ESPN)...")
         injury_statuses = get_injury_statuses(unique_players)
+
+        # Merge manual overrides (data/injury_overrides.json) for today's date
+        _overrides_file = Path("data/injury_overrides.json")
+        if _overrides_file.exists():
+            try:
+                _all_overrides = json.loads(_overrides_file.read_text(encoding="utf-8"))
+                _today_overrides = _all_overrides.get(date_str, {})
+                if _today_overrides:
+                    injury_statuses.update(_today_overrides)
+                    print(f"[main] Injected {len(_today_overrides)} manual injury overrides for {date_str}")
+            except Exception as _e:
+                print(f"[main] Could not load injury overrides: {_e}")
 
         # ── 8. Absent teammate cascade (for usage boost) ──────────────────────
         team_absent_players = _build_team_absent_players(injury_statuses, player_logs)
