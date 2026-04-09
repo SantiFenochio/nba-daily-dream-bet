@@ -73,9 +73,13 @@ def _fetch_sportsdata_team_stats(api_key: str) -> dict[str, dict]:
         if not abbr:
             continue
 
-        ppg        = float(r.get("Points")      or LEAGUE_AVG_PPG)
-        possessions = float(r.get("Possessions") or 0)
-        pace_est   = possessions if 85 <= possessions <= 115 else LEAGUE_AVG_PACE
+        games = float(r.get("Games") or 1)
+        # SportsData returns season TOTALS — divide by games to get per-game averages
+        pts_total   = float(r.get("Points")      or 0)
+        poss_total  = float(r.get("Possessions") or 0)
+        ppg         = pts_total  / games if games > 0 else LEAGUE_AVG_PPG
+        pace_raw    = poss_total / games if games > 0 else 0
+        pace_est    = pace_raw if 85 <= pace_raw <= 115 else LEAGUE_AVG_PACE
 
         # Defensive quality proxy:
         # Teams that score more tend to play in higher-scoring games → allow more pts.
