@@ -19,6 +19,8 @@ def format_message(
     fallback_mode: bool = False,
     parlays: list[dict] | None = None,
     accuracy: dict | None = None,
+    escalera_data: dict | None = None,
+    consistency_picks: list[dict] | None = None,
 ) -> str:
     today = datetime.now(ET).strftime("%d/%m/%Y")
     gt = game_times or {}
@@ -75,6 +77,11 @@ def format_message(
             )
 
         summary_lines.append("")
+
+    # ── SECCIÓN 1b: Picks de Consistencia ────────────────────────────────────
+    consistency_lines: list[str] = []
+    if consistency_picks:
+        consistency_lines = _format_consistency_section(consistency_picks)
 
     # ── SECCIÓN 2: Análisis detallado ────────────────────────────────────────
     detail_lines = [
@@ -154,7 +161,19 @@ def format_message(
             "<i>⚠️ Las combinadas multiplican riesgos. Apostá montos pequeños.</i>"
         )
 
-    return "\n".join(summary_lines) + "\n" + "\n".join(detail_lines) + "\n".join(parlay_lines)
+    # ── SECCIÓN 4: Escalera del Día ───────────────────────────────────────────
+    escalera_lines: list[str] = []
+    if escalera_data:
+        escalera_lines = _format_escalera_section(escalera_data)
+
+    return (
+        "\n".join(summary_lines)
+        + ("\n" + "\n".join(consistency_lines) if consistency_lines else "")
+        + "\n"
+        + "\n".join(detail_lines)
+        + "\n".join(parlay_lines)
+        + ("\n" + "\n".join(escalera_lines) if escalera_lines else "")
+    )
 
 
 def _format_pick_detail(pick: PlayerPick) -> list[str]:
@@ -275,6 +294,105 @@ def _ev_bar(ev_pct: float) -> str:
     if ev_pct >= 4:
         return "██░░░"
     return "█░░░░"
+
+
+def _format_consistency_section(picks: list[dict]) -> list[str]:
+    """
+    Render the '🎯 PICKS DE CONSISTENCIA' section.
+
+    Each pick dict: player, market, market_key, line, price,
+                    hits, games, hit_rate, avg, game_label.
+    """
+    out = [
+        "━" * 30,
+        "🎯 <b>PICKS DE CONSISTENCIA</b>",
+        "━" * 30,
+        "<i>Sin modelos. Solo historial real: ¿cuántas veces superó la línea?</i>",
+        "",
+    ]
+
+    for p in picks:
+        hits     = p["hits"]
+        games    = p["games"]
+        pct      = round(p["hit_rate"] * 100)
+        avg      = p["avg"]
+        line     = p["line"]
+        market   = p["market"]
+        player   = p["player"]
+        price    = p.get("price", 0)
+
+        # Emoji ladder by hit rate
+        if pct >= 93:
+            emoji = "🔥"
+        elif pct >= 87:
+            emoji = "✅"
+        else:
+            emoji = "⚡"
+
+        # American odds → readable string
+        if price > 0:
+            odds_str = f"+{price}"
+        elif price < 0:
+            odds_str = str(price)
+        else:
+            odds_str = ""
+        odds_part = f"  <code>{odds_str}</code>" if odds_str else ""
+
+        out.append(
+            f"{emoji} <b>{_h(player)}</b> — {_h(market)} Over {line}{odds_part}"
+        )
+        out.append(
+            f"   <code>{hits}/{games} partidos ({pct}%)</code>"
+            f"  |  Prom. L{games}: <b>{avg:.1f}</b> {_h(market.lower())}"
+        )
+        out.append("")
+
+    out.append(
+        "<i>💡 Picks 100% basados en historial reciente. Verificá siempre el contexto del partido.</i>"
+    )
+    out.append("")
+    return out
+
+
+def _format_escalera_section(escalera_data: dict) -> list[str]:
+    """
+    Render the '🏆 ESCALERA DEL DÍA 🪜' section from the escalera_data dict.
+
+    Expected keys: player, stat_name, lines (list of 3 dicts), analysis, game_label.
+    Each line dict: {"line": float, "decimal": float, "units": int}
+    """
+    player    = escalera_data["player"]
+    stat_name = escalera_data["stat_name"]
+    lines     = escalera_data["lines"]    # list of 3 dicts
+    analysis  = escalera_data["analysis"]
+
+    out = [
+        "",
+        "━" * 30,
+        "🏆 <b>ESCALERA DEL DÍA</b> 🪜",
+        "━" * 30,
+        "",
+        f"<b>{_h(player)} escalera de {_h(stat_name)}</b> 🪜",
+    ]
+
+    for entry in lines:
+        line_val = entry["line"]
+        decimal  = entry["decimal"]
+        units    = entry["units"]
+        # Format decimal odds: show 2 decimal places for values < 10, 1 for higher
+        if decimal < 10:
+            odds_str = f"{decimal:.2f}"
+        else:
+            odds_str = f"{decimal:.1f}"
+        out.append(
+            f"Over {line_val} {_h(stat_name)} | {odds_str} ({units} unidades)"
+        )
+
+    out.append("")
+    out.append(f"<i>{_h(analysis)}</i>")
+    out.append("")
+
+    return out
 
 
 def _h(text: str) -> str:

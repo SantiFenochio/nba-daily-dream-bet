@@ -12,6 +12,8 @@ from modules.fetch_player_stats import get_player_logs, get_injury_statuses
 from modules.fetch_context import get_team_context
 from modules.analyzer import analyze_player_props
 from modules.formatter import format_message
+from modules.escalera import generate_escalera_data
+from modules.consistency_picks import generate_consistency_picks
 from modules.parlay_builder import build_parlays
 from modules.history import (
     load_history, save_history, record_picks,
@@ -89,7 +91,7 @@ def _build_team_absent_players(
 
 
 async def main():
-    date_str = datetime.now(ET).strftime("%Y-%m-%d")
+    date_str = os.environ.get("DATE_OVERRIDE") or datetime.now(ET).strftime("%Y-%m-%d")
     print(f"[main] Date (ET): {date_str}")
 
     try:
@@ -189,6 +191,15 @@ async def main():
         parlays = build_parlays(picks_by_game, n_parlays=5)
         print(f"[main] Parlays built: {len(parlays)}")
 
+        # ── 12b. Escalera del Día ─────────────────────────────────────────────
+        escalera_data = generate_escalera_data(picks_by_game, prop_records, player_logs)
+        print(f"[main] Escalera: {escalera_data['player'] if escalera_data else 'none'}")
+
+        # ── 12c. Picks de Consistencia ────────────────────────────────────────
+        print("[main] Building consistency picks...")
+        consistency = generate_consistency_picks(player_logs, prop_records)
+        print(f"[main] Consistency picks: {len(consistency)}")
+
         # ── 13. Record today's picks in history (hit=None, filled tomorrow) ──
         history = record_picks(date_str, picks_by_game, history)
         save_history(history)
@@ -201,6 +212,8 @@ async def main():
             fallback_mode=fallback_mode,
             parlays=parlays,
             accuracy=accuracy,
+            escalera_data=escalera_data,
+            consistency_picks=consistency or None,
         )
         await send_telegram_message(message)
         print("[main] Done.")
