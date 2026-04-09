@@ -14,6 +14,10 @@ PROP_MARKETS = (
     "player_steals,"
     "player_blocks,"
     "player_points_rebounds_assists,"
+    "player_points_assists,"
+    "player_points_rebounds,"
+    "player_rebounds_assists,"
+    "player_blocks_steals,"
     "player_turnovers"
 )
 
@@ -28,6 +32,10 @@ MARKET_LABELS = {
     "player_steals": "Robos",
     "player_blocks": "Tapas",
     "player_points_rebounds_assists": "PRA",
+    "player_points_assists": "Pts+Ast",
+    "player_points_rebounds": "Pts+Reb",
+    "player_rebounds_assists": "Reb+Ast",
+    "player_blocks_steals": "Tap+Rob",
     "player_turnovers": "Pérdidas",
 }
 

@@ -41,6 +41,10 @@ STAT_COL = {
     "player_blocks":                  "BLK",
     "player_turnovers":               "TOV",
     "player_points_rebounds_assists": "__PRA__",
+    "player_points_assists":          "__PA__",
+    "player_points_rebounds":         "__PR__",
+    "player_rebounds_assists":        "__RA__",
+    "player_blocks_steals":           "__BS__",
 }
 
 # ── Module-level game-log cache built once per process ────────────────────────
@@ -281,14 +285,17 @@ def get_player_logs(player_name: str, last_n: int = 20) -> list[dict]:
 # ── Stat extraction helpers ───────────────────────────────────────────────────
 
 def get_stat_value(game: dict, market_key: str) -> float | None:
-    if market_key == "player_points_rebounds_assists":
-        return (
-            float(game.get("PTS") or 0) +
-            float(game.get("REB") or 0) +
-            float(game.get("AST") or 0)
-        )
+    combos = {
+        "player_points_rebounds_assists": ("PTS", "REB", "AST"),
+        "player_points_assists":          ("PTS", "AST"),
+        "player_points_rebounds":         ("PTS", "REB"),
+        "player_rebounds_assists":        ("REB", "AST"),
+        "player_blocks_steals":           ("BLK", "STL"),
+    }
+    if market_key in combos:
+        return sum(float(game.get(c) or 0) for c in combos[market_key])
     col = STAT_COL.get(market_key)
-    if col and col != "__PRA__":
+    if col and not col.startswith("__"):
         val = game.get(col)
         if val is not None:
             try:

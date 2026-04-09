@@ -34,6 +34,8 @@ LEAGUE_AVG_PACE    = 99.5
 OFFENSIVE_MARKETS = {
     "player_points", "player_rebounds", "player_assists",
     "player_points_rebounds_assists", "player_threes",
+    "player_points_assists", "player_points_rebounds",
+    "player_rebounds_assists",
 }
 
 # SportsData.io projection field per market key
