@@ -63,36 +63,56 @@ def _fetch_sportsdata_team_stats(api_key: str) -> dict[str, dict]:
         print(f"[context] SportsData: abbreviations look scrambled ({real}/30 valid) — skipping")
         return {}
 
-    # Compute league average PPG to derive a defensive quality proxy for each team
-    ppg_values = [float(r.get("Points") or 0) for r in records if r.get("Points")]
-    league_avg = sum(ppg_values) / len(ppg_values) if ppg_values else LEAGUE_AVG_PPG
-
-    context: dict[str, dict] = {}
+    # First pass: compute raw per-game PPG values for each team
+    raw_ppg: dict[str, float] = {}
+    raw_poss: dict[str, float] = {}
     for r in records:
         abbr = (r.get("Team") or "").strip()
         if not abbr:
             continue
-
         games = float(r.get("Games") or 1)
-        # SportsData returns season TOTALS — divide by games to get per-game averages
-        pts_total   = float(r.get("Points")      or 0)
-        poss_total  = float(r.get("Possessions") or 0)
-        ppg         = pts_total  / games if games > 0 else LEAGUE_AVG_PPG
-        pace_raw    = poss_total / games if games > 0 else 0
-        pace_est    = pace_raw if 85 <= pace_raw <= 115 else LEAGUE_AVG_PACE
+        if games <= 0:
+            continue
+        pts   = float(r.get("Points")      or 0)
+        poss  = float(r.get("Possessions") or 0)
+        raw_ppg[abbr]  = pts  / games
+        raw_poss[abbr] = poss / games
 
-        # Defensive quality proxy:
-        # Teams that score more tend to play in higher-scoring games → allow more pts.
-        # Simple linear relationship: opp_pts ≈ league_avg + (ppg - league_avg) * 0.4
-        # This is a rough but reasonable estimate when direct opp_pts isn't available.
-        opp_pts = round(league_avg + (ppg - league_avg) * 0.40, 1)
-        # Clamp to realistic range [104, 124]
-        opp_pts = max(104.0, min(124.0, opp_pts))
+    if not raw_ppg:
+        return {}
+
+    # SportsData returns season stats that may be stored at a different scale
+    # (e.g. per-100-possessions, per-half, or cumulative with roster multiplier).
+    # Normalize so the league average maps to LEAGUE_AVG_PPG (114.0 for 2025-26).
+    raw_league_avg = sum(raw_ppg.values()) / len(raw_ppg)
+    scale = LEAGUE_AVG_PPG / raw_league_avg if raw_league_avg > 0 else 1.0
+
+    # Same normalization for pace
+    raw_pace_avg = sum(raw_poss.values()) / len(raw_poss) if raw_poss else 0
+    pace_scale   = LEAGUE_AVG_PACE / raw_pace_avg if raw_pace_avg > 5 else 0.0
+
+    print(f"[context] SportsData scale factor: {scale:.3f} "
+          f"(raw_avg={raw_league_avg:.1f} → normalized to {LEAGUE_AVG_PPG})")
+
+    context: dict[str, dict] = {}
+    for abbr, ppg_raw in raw_ppg.items():
+        ppg = round(ppg_raw * scale, 1)
+
+        pace_est = LEAGUE_AVG_PACE
+        if pace_scale > 0 and abbr in raw_poss:
+            normalized_pace = raw_poss[abbr] * pace_scale
+            if 85 <= normalized_pace <= 115:
+                pace_est = round(normalized_pace, 1)
+
+        # Defensive quality proxy: teams that outscore league avg tend to allow more pts
+        # Linear model: opp_pts ≈ league_avg + (ppg - league_avg) * 0.40
+        opp_pts = round(LEAGUE_AVG_PPG + (ppg - LEAGUE_AVG_PPG) * 0.40, 1)
+        opp_pts = max(104.0, min(124.0, opp_pts))   # clamp to realistic range
 
         context[abbr] = {
-            "ppg":        round(ppg, 1),
+            "ppg":        ppg,
             "opp_pts":    opp_pts,
-            "pace_est":   round(pace_est, 1),
+            "pace_est":   pace_est,
             "def_rating": opp_pts,
         }
 
