@@ -65,54 +65,75 @@ def _parse_byteam(data: dict) -> dict[str, dict]:
         print("[context] ESPN byteam: no 'categories' in response")
         return {}
 
-    # Log category names so we can diagnose structure issues
+    # Log categories + sample labels so we can diagnose structure
     cat_names = [c.get("name", c.get("type", "?")) for c in categories]
     print(f"[context] ESPN byteam categories: {cat_names}")
+    for i, cat in enumerate(categories[:3]):
+        lbl_sample = (cat.get("labels") or cat.get("names") or [])[:10]
+        print(f"[context]   cat[{i}] labels[:10]: {lbl_sample}")
 
-    # Identify own-scoring and opponent-scoring categories
-    own_cat = None
+    # ESPN byteam structure:
+    #   categories[0] = own-team general (GP, GS, MIN, FGM, FGA, FG%, 3PM, 3PA, 3P%, FTM, FTA, FT%, OR, DR, REB, AST, TO, STL, BLK, PF, PTS)
+    #   categories[1] = opponent general (same schema, opponent stats)
+    #   categories[2] = own defensive
+    #   categories[3] = opponent defensive  ...etc.
+    # PTS is typically the LAST label in the general category (index 20 of 21)
+
+    def _find_idx(cat: dict, *candidates: str) -> int | None:
+        # Try labels first, then names, then displayNames
+        for field in ("labels", "names", "displayNames"):
+            arr = cat.get(field) or []
+            if not arr:
+                continue
+            # Exact match (case-insensitive)
+            for cand in candidates:
+                for i, lbl in enumerate(arr):
+                    if str(lbl).upper() == cand.upper():
+                        return i
+            # Partial match
+            for cand in candidates:
+                for i, lbl in enumerate(arr):
+                    if cand.lower() in str(lbl).lower():
+                        return i
+        return None
+
+    # Own team (first general category)
+    own_cat = categories[0] if categories else None
+    # Opponent (second general category, or first one with "opponent" in name)
     opp_cat = None
     for cat in categories:
-        name = (cat.get("name") or cat.get("type") or "").lower()
-        if any(k in name for k in ("opponent", "opp", "against", "allowed")):
-            if opp_cat is None:
-                opp_cat = cat
-        elif any(k in name for k in ("offensive", "offense", "scoring", "general", "overall")):
-            if own_cat is None:
-                own_cat = cat
-
-    # Fallback: first two categories are own / opponent
-    if own_cat is None and len(categories) >= 1:
-        own_cat = categories[0]
+        name = (cat.get("name") or "").lower()
+        if "opponent" in name or "opp" in name:
+            opp_cat = cat
+            break
     if opp_cat is None and len(categories) >= 2:
         opp_cat = categories[1]
 
     if not own_cat:
-        print("[context] ESPN byteam: could not identify own-team category")
+        print("[context] ESPN byteam: no categories found")
         return {}
 
-    def _find_idx(cat: dict, *candidates: str) -> int | None:
-        labels = cat.get("labels") or cat.get("names") or []
-        for cand in candidates:
-            for i, lbl in enumerate(labels):
-                if str(lbl).upper() == cand.upper():
-                    return i
-        # Fuzzy: partial match on field names
-        for cand in candidates:
-            for i, lbl in enumerate(labels):
-                if cand.lower() in str(lbl).lower():
-                    return i
-        return None
-
-    own_pts_idx = _find_idx(own_cat, "PTS", "avgPoints", "points")
-    opp_pts_idx = _find_idx(opp_cat, "PTS", "avgPoints", "points") if opp_cat else None
-    own_fga_idx = _find_idx(own_cat, "FGA", "fieldGoalsAttempted")
-    own_or_idx  = _find_idx(own_cat, "OR", "OREB", "offReb", "offensiveRebounds")
-    own_to_idx  = _find_idx(own_cat, "TO", "TOV", "turnovers")
-    own_fta_idx = _find_idx(own_cat, "FTA", "freeThrowsAttempted")
+    own_pts_idx = _find_idx(own_cat, "PTS", "pts", "points", "avgPoints")
+    opp_pts_idx = _find_idx(opp_cat, "PTS", "pts", "points", "avgPoints") if opp_cat else None
+    own_fga_idx = _find_idx(own_cat, "FGA", "fga", "fieldGoalsAttempted")
+    own_or_idx  = _find_idx(own_cat, "OR", "OREB", "offReb", "offensiveRebounds", "orb")
+    own_to_idx  = _find_idx(own_cat, "TO", "TOV", "turnovers", "tov")
+    own_fta_idx = _find_idx(own_cat, "FTA", "fta", "freeThrowsAttempted")
 
     print(f"[context] Label indices — own_pts:{own_pts_idx} opp_pts:{opp_pts_idx} "
           f"fga:{own_fga_idx} or:{own_or_idx} to:{own_to_idx} fta:{own_fta_idx}")
+
+    # If we still can't find PTS, try the last label (it's usually PTS in box score order)
+    if own_pts_idx is None:
+        labels = own_cat.get("labels") or own_cat.get("names") or []
+        if labels:
+            own_pts_idx = len(labels) - 1
+            print(f"[context] Falling back to last label for own_pts: idx={own_pts_idx} ({labels[-1]})")
+    if opp_pts_idx is None and opp_cat:
+        labels = opp_cat.get("labels") or opp_cat.get("names") or []
+        if labels:
+            opp_pts_idx = len(labels) - 1
+            print(f"[context] Falling back to last label for opp_pts: idx={opp_pts_idx} ({labels[-1]})")
 
     # Build opponent lookup: teamId → values list
     opp_by_id: dict[str, list] = {}
