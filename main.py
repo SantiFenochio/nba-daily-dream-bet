@@ -12,6 +12,7 @@ from modules.fetch_games import get_today_games
 from modules.fetch_props import get_player_props, parse_props
 from modules.fetch_player_stats import get_player_logs, get_injury_statuses
 from modules.fetch_context import get_team_context
+from modules.fetch_projections import get_player_projections
 from modules.analyzer import analyze_player_props
 from modules.formatter import format_message
 from modules.escalera import generate_escalera_data
@@ -161,11 +162,15 @@ async def main():
         # ── 8. Absent teammate cascade (for usage boost) ──────────────────────
         team_absent_players = _build_team_absent_players(injury_statuses, player_logs)
 
-        # ── 9. Backtest yesterday + compute calibration ───────────────────────
+        # ── 9. SportsData.io player projections ──────────────────────────────
+        print("[main] Fetching SportsData.io player projections...")
+        projections = get_player_projections(date_str, unique_players)
+
+        # ── 10. Backtest yesterday + compute calibration ──────────────────────
         history, accuracy = backtest_yesterday(history, player_logs)
         calibration = get_calibration_factors(accuracy)
 
-        # ── 10. Analyze ──────────────────────────────────────────────────────
+        # ── 11. Analyze ───────────────────────────────────────────────────────
         print("[main] Analyzing player props...")
         shared_args = dict(
             prop_records=prop_records,
@@ -177,6 +182,7 @@ async def main():
             game_lines=game_lines,
             team_absent_players=team_absent_players,
             market_ev_multipliers=calibration,
+            projections=projections,
         )
         picks_by_game = analyze_player_props(**shared_args)
 
@@ -198,7 +204,7 @@ async def main():
             )
             return
 
-        # ── 11. Game start times in Argentina timezone ────────────────────────
+        # ── 12. Game start times in Argentina timezone ───────────────────────
         game_times = _build_game_times(games)
 
         # ── 12. Build parlay recommendations ─────────────────────────────────

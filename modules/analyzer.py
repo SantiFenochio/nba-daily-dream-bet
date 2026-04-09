@@ -4,11 +4,13 @@ analyzer.py — Simple NBA prop analyzer.
 Logic:
   1. For each player/prop, compute L15 hit rate, L15/L5 avg, L10 min, streak.
   2. Assign confidence: Alta / Media / Baja based on hit rate + avg edge over line.
-  3. Filter: skip OUT players, skip < 20 min avg, skip Baja if enough picks.
-  4. Cap at MAX_TOTAL_PICKS (15), MAX_PICKS_PER_GAME (4) per game.
+  3. Apply matchup multiplier from team_context (opponent def quality + pace).
+  4. Apply projection multiplier from SportsData.io projections if available.
+  5. Filter: skip OUT players, skip < 20 min avg, skip Baja if enough picks.
+  6. Cap at MAX_TOTAL_PICKS (15), MAX_PICKS_PER_GAME (4) per game.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from modules.fetch_player_stats import get_stat_value, parse_minutes
 from modules.fetch_props import MARKET_LABELS
 
@@ -23,6 +25,28 @@ ALTA_HIT_RATE  = 0.80   # >= 80% L15 hit rate
 ALTA_EDGE      = 0.10   # avg L15 >= line * 1.10 (+10%)
 MEDIA_HIT_RATE = 0.67   # >= 67% L15 hit rate
 MEDIA_EDGE     = 0.05   # avg L15 >= line * 1.05 (+5%)
+
+# Team context defaults (league averages 2025-26)
+LEAGUE_AVG_OPP_PTS = 114.0
+LEAGUE_AVG_PACE    = 99.5
+
+# Markets where opponent defensive quality matters (offensive props)
+OFFENSIVE_MARKETS = {
+    "player_points", "player_rebounds", "player_assists",
+    "player_points_rebounds_assists", "player_threes",
+}
+
+# SportsData.io projection field per market key
+_PROJ_STAT_MAP = {
+    "player_points":                    "pts",
+    "player_rebounds":                  "reb",
+    "player_assists":                   "ast",
+    "player_steals":                    "stl",
+    "player_blocks":                    "blk",
+    "player_turnovers":                 "to",
+    "player_threes":                    "threes",
+    "player_points_rebounds_assists":   "pra",
+}
 
 
 @dataclass
@@ -121,6 +145,17 @@ def _get_avg_minutes(logs: list[dict]) -> float:
     return sum(minutes) / len(minutes)
 
 
+def _get_proj_stat(proj: dict, market_key: str) -> float | None:
+    """Return the projected value for a given market key from SportsData projections."""
+    key = _PROJ_STAT_MAP.get(market_key)
+    if key and key in proj:
+        try:
+            return float(proj[key])
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def _assign_confidence(hit_rate_l15: float, avg_l15: float, line: float) -> str:
     edge_ratio = avg_l15 / line if line > 0 else 1.0
     if hit_rate_l15 >= ALTA_HIT_RATE and edge_ratio >= (1.0 + ALTA_EDGE):
@@ -141,20 +176,21 @@ def analyze_player_props(
     team_absent_players=None,
     market_ev_multipliers=None,
     min_ev_threshold=None,
+    projections=None,
 ) -> dict[str, list[PlayerPick]]:
     """
     Analyze player props and return picks_by_game.
 
-    Simple logic:
       - Only Over props analyzed
-      - Confirmed OUT players skipped
+      - Confirmed OUT players skipped (also from SportsData projections)
       - Players averaging < 20 min skipped
       - Confidence: Alta / Media / Baja by hit rate + edge
-      - Back-to-back: lowers confidence one level, adds warning
+      - Back-to-back: lowers confidence one level
+      - Matchup multiplier: opponent defensive quality + game pace (team_context)
+      - Projection multiplier: SportsData.io projected stat vs line (projections)
       - Returns up to MAX_TOTAL_PICKS, MAX_PICKS_PER_GAME per game
-      - Alta and Media only; Baja included only if < 5 picks total
     """
-    # Build game_label → team abbreviations map for B2B detection
+    # Build game_label → {team_abbr, ...} map
     game_team_abbrs: dict[str, set[str]] = {}
     for g in games:
         label = f"{g['visitor_team']['full_name']} @ {g['home_team']['full_name']}"
@@ -162,6 +198,9 @@ def analyze_player_props(
             g["home_team"]["abbreviation"],
             g["visitor_team"]["abbreviation"],
         }
+
+    ctx_hits = 0   # count picks that received a context adjustment
+    proj_hits = 0  # count picks that received a projection adjustment
 
     candidates: list[PlayerPick] = []
     seen_props: set[tuple] = set()
@@ -184,10 +223,15 @@ def analyze_player_props(
             continue
         seen_props.add(prop_key)
 
-        # Skip confirmed OUT
+        # Skip confirmed OUT (ESPN + manual overrides already in injury_statuses)
         inj = injury_statuses.get(player)
         if inj and "out" in inj.lower():
             continue
+
+        # Also skip if SportsData marks player as OUT (extra layer)
+        if projections and player in projections:
+            if (projections[player].get("inj_status") or "").lower() == "out":
+                continue
 
         logs = player_logs.get(player, [])
         if not logs:
@@ -212,9 +256,66 @@ def analyze_player_props(
             elif confidence == "Media":
                 confidence = "Baja"
 
-        # Score: hit rate primary, edge secondary
+        # Base score: hit rate primary, edge secondary
         edge_ratio = (stats["avg_l15"] / line) if line > 0 else 1.0
         score = hit_rate_l15 * 0.70 + min(edge_ratio - 1.0, 0.50) * 0.30
+
+        # ── Matchup multiplier (team_context) ─────────────────────────────────
+        if team_context:
+            player_team = (player_logs.get(player) or [{}])[0].get("TEAM_ABBREVIATION")
+            if player_team:
+                game_abbrs = game_team_abbrs.get(game_label, set())
+                opp_team   = next((a for a in game_abbrs if a != player_team), None)
+
+                # Opponent defensive quality → affects offensive props
+                if opp_team and opp_team in team_context and market_key in OFFENSIVE_MARKETS:
+                    opp_pts = team_context[opp_team].get("opp_pts", LEAGUE_AVG_OPP_PTS)
+                    if opp_pts > 117:       # weak defense
+                        score *= 1.07
+                        ctx_hits += 1
+                    elif opp_pts > 114:
+                        score *= 1.03
+                        ctx_hits += 1
+                    elif opp_pts < 108:     # elite defense
+                        score *= 0.91
+                        ctx_hits += 1
+                    elif opp_pts < 111:
+                        score *= 0.96
+                        ctx_hits += 1
+
+                # Game pace → affects all props
+                own_pace = team_context.get(player_team, {}).get("pace_est", LEAGUE_AVG_PACE)
+                opp_pace = team_context.get(opp_team,   {}).get("pace_est", LEAGUE_AVG_PACE) if opp_team else LEAGUE_AVG_PACE
+                game_pace = (own_pace + opp_pace) / 2
+                if game_pace > 102:
+                    score *= 1.02
+                elif game_pace < 96:
+                    score *= 0.98
+
+        # ── Projection multiplier (SportsData.io) ─────────────────────────────
+        if projections and player in projections:
+            proj = projections[player]
+
+            # Skip if projected minutes are too low (player unlikely to play enough)
+            proj_min = proj.get("min", 35.0)
+            if proj_min > 0 and proj_min < 18:
+                continue
+
+            proj_stat = _get_proj_stat(proj, market_key)
+            if proj_stat is not None and proj_stat > 0 and line > 0:
+                proj_edge = (proj_stat - line) / line
+                if proj_edge > 0.25:        # projection 25%+ above line → strong signal
+                    score *= 1.10
+                    proj_hits += 1
+                elif proj_edge > 0.12:      # 12%+ above
+                    score *= 1.05
+                    proj_hits += 1
+                elif proj_edge < -0.20:     # projection 20%+ below line → fade
+                    score *= 0.87
+                    proj_hits += 1
+                elif proj_edge < -0.10:
+                    score *= 0.93
+                    proj_hits += 1
 
         pick = PlayerPick(
             player=player,
@@ -241,6 +342,9 @@ def analyze_player_props(
             ev_pct=0.0,
         )
         candidates.append(pick)
+
+    print(f"[analyzer] {len(candidates)} candidates | "
+          f"context adjustments: {ctx_hits} | projection adjustments: {proj_hits}")
 
     # Sort by score descending
     candidates.sort(key=lambda p: -p.score)
