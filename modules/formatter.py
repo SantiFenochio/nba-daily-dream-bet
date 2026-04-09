@@ -1,3 +1,22 @@
+"""
+formatter.py — Telegram message formatter (simple mode).
+
+Per-pick block:
+  ═══════════════════════
+  🏀 JUGADOR | STAT | OVER línea
+  📊 L15: X/15 (XX%) | Prom: XX.X (+X.X vs línea)
+  📈 L5: X/5 | Racha actual: X seguidos
+  💰 Precio: -110
+  ✅ Confianza: ALTA
+  ═══════════════════════
+
+Per-parlay block:
+  🎯 NOMBRE (N patas)
+    └─ Jugador | Over X.X Stat  L15: 12/15 (80%)
+    └─ ...
+  📊 Prob. estimada: ~XX% (multiplicación de hit rates)
+"""
+
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -6,10 +25,16 @@ from modules.analyzer import PlayerPick
 ET = ZoneInfo("America/New_York")
 
 CONFIDENCE_EMOJI = {
-    "Alta":     "🔥",
-    "Media":    "⚡",
-    "Baja":     "❄️",
-    "Riesgosa": "🎲",
+    "Alta":  "✅",
+    "Media": "⚡",
+    "Baja":  "❄️",
+}
+
+PARLAY_EMOJI = {
+    "La Segura":        "🛡️",
+    "El Balance":       "⚖️",
+    "La Arriesgada":    "🎯",
+    "Los Consistentes": "💎",
 }
 
 
@@ -20,7 +45,7 @@ def format_message(
     parlays: list[dict] | None = None,
     accuracy: dict | None = None,
     escalera_data: dict | None = None,
-    consistency_picks: list[dict] | None = None,
+    consistency_picks: list[dict] | None = None,  # kept for API compat, not shown
 ) -> str:
     today = datetime.now(ET).strftime("%d/%m/%Y")
     gt = game_times or {}
@@ -29,341 +54,135 @@ def format_message(
         return f"🏀 <b>NBA DAILY DREAM BET — {today}</b>\n\nNo hay picks disponibles hoy."
 
     total_picks = sum(len(v) for v in picks_by_game.values())
+    alta_count  = sum(1 for picks in picks_by_game.values() for p in picks if p.confidence == "Alta")
+    media_count = sum(1 for picks in picks_by_game.values() for p in picks if p.confidence == "Media")
 
-    # ── SECCIÓN 1: Resumen compacto ──────────────────────────────────────────
-    if fallback_mode:
-        subtitle = f"<i>{total_picks} mejores picks del día — mercado ajustado (EV bajo umbral normal)</i>"
-    else:
-        subtitle = f"<i>{total_picks} picks con EV positivo en {len(picks_by_game)} partido(s)</i>"
-
-    summary_lines = [
+    lines: list[str] = [
         f"🏀 <b>NBA DAILY DREAM BET — {today}</b>",
-        subtitle,
+        f"<i>{total_picks} picks hoy · {alta_count} ✅ Alta · {media_count} ⚡ Media</i>",
     ]
 
-    # Yesterday's performance line
+    if fallback_mode:
+        lines.append("<i>⚠️ Modo fallback — EV bajo umbral normal</i>")
+
+    # Yesterday accuracy
     if accuracy:
-        yday = accuracy.get("yesterday")
+        yday    = accuracy.get("yesterday")
         overall = accuracy.get("overall")
         if yday and yday["total"] > 0:
-            pct = round(yday["rate"] * 100)
+            pct   = round(yday["rate"] * 100)
             emoji = "✅" if pct >= 60 else "⚠️" if pct >= 40 else "❌"
-            summary_lines.append(
-                f"{emoji} <i>Ayer: {yday['hits']}/{yday['total']} picks ({pct}%)"
-                + (f" | Histórico: {round(overall['rate']*100)}% ({overall['total']} picks)" if overall and overall["total"] >= 10 else "")
-                + "</i>"
+            hist  = (
+                f" | Histórico: {round(overall['rate']*100)}% ({overall['total']} picks)"
+                if overall and overall["total"] >= 10 else ""
             )
+            lines.append(f"{emoji} <i>Ayer: {yday['hits']}/{yday['total']} ({pct}%){hist}</i>")
         elif overall and overall["total"] >= 10:
-            summary_lines.append(
-                f"<i>Histórico: {round(overall['rate']*100)}% de acierto ({overall['total']} picks resueltos)</i>"
+            lines.append(
+                f"<i>Histórico: {round(overall['rate']*100)}% ({overall['total']} picks resueltos)</i>"
             )
 
-    summary_lines.append("")
+    lines.append("")
 
+    # ── PICKS POR PARTIDO ────────────────────────────────────────────────────
     for game_label, picks in picks_by_game.items():
-        hora = gt.get(game_label)
-        display_label = game_label.replace(" @ ", " vs ")
-        header = f"<b>{_h(display_label)}</b>"
+        hora    = gt.get(game_label)
+        display = game_label.replace(" @ ", " vs ")
+        header  = f"<b>🏀 {_h(display)}</b>"
         if hora:
             header += f"  🕐 {hora}"
-        summary_lines.append(header)
-        summary_lines.append("─" * 28)
+        lines.append(header)
+        lines.append("━" * 28)
 
         for pick in picks:
-            emoji = CONFIDENCE_EMOJI.get(pick.confidence, "")
-            side_upper = pick.side.upper()
-            summary_lines.append(
-                f"{emoji} <b>{_h(pick.player)}</b> — {_h(pick.market)} {side_upper} {pick.line}"
-            )
+            lines += _format_pick(pick)
+            lines.append("")
 
-        summary_lines.append("")
-
-    # ── SECCIÓN 1b: Picks de Consistencia ────────────────────────────────────
-    consistency_lines: list[str] = []
-    if consistency_picks:
-        consistency_lines = _format_consistency_section(consistency_picks)
-
-    # ── SECCIÓN 2: Análisis detallado ────────────────────────────────────────
-    detail_lines = [
-        "━" * 30,
-        "📋 <b>ANÁLISIS DETALLADO</b>",
-        "━" * 30,
-        "",
-    ]
-
-    for game_label, picks in picks_by_game.items():
-        for pick in picks:
-            detail_lines += _format_pick_detail(pick)
-            detail_lines.append("")
-
-    detail_lines.append(
-        "<i>EV calculado via devig. Probabilidad: Poisson + Bayes. "
-        "Apostá con responsabilidad.</i>"
-    )
-
-    # ── SECCIÓN 3: Combinadas recomendadas ────────────────────────────────────
-    # Ordenadas por prob. conjunta realista (corr_joint_prob) si está disponible,
-    # con fallback a hit_rate_product para compatibilidad con versiones anteriores.
-    parlay_lines: list[str] = []
+    # ── COMBINADAS ───────────────────────────────────────────────────────────
     if parlays:
-        sorted_parlays = sorted(
-            parlays,
-            key=lambda p: p.get("corr_joint_prob", p["hit_rate_product"]),
-            reverse=True,
-        )
-        parlay_lines += [
-            "",
+        lines += [
             "━" * 30,
-            "🎰 <b>COMBINADAS RECOMENDADAS</b>",
+            "🎰 <b>COMBINADAS DEL DÍA</b>",
             "━" * 30,
-            "<i>Prob. con correlaciones (Monte Carlo) | 1 pick/partido</i>",
             "",
         ]
-        for i, parlay in enumerate(sorted_parlays, 1):
-            name   = parlay["name"]
-            legs   = parlay["legs"]
-            n_legs = len(legs)
+        for parlay in parlays:
+            lines += _format_parlay(parlay)
+            lines.append("")
 
-            # Preferir probabilidad realista; fallback a naïve si el builder es v1
-            corr_prob  = parlay.get("corr_joint_prob", parlay["hit_rate_product"])
-            naive_prob = parlay["hit_rate_product"]
-            ev_pct     = parlay.get("parlay_ev_pct")
+        lines.append("<i>⚠️ Las combinadas multiplican riesgos. Apostá montos pequeños.</i>")
 
-            # Línea de cabecera con prob. realista + EV si disponible
-            ev_str = ""
-            if ev_pct is not None:
-                ev_sign = "+" if ev_pct >= 0 else ""
-                ev_str  = f" | EV: <b>{ev_sign}{ev_pct:.1f}%</b>"
-
-            parlay_lines.append(
-                f"<b>#{i} {_h(name)}</b> ({n_legs} patas){ev_str}"
-            )
-            # Prob. conjunta realista en línea propia (más legible en Telegram)
-            parlay_lines.append(
-                f"  📊 Prob. conjunta: <b>{corr_prob * 100:.1f}%</b>"
-                + (
-                    f"  <i>(naïve: {naive_prob * 100:.0f}%)</i>"
-                    if abs(corr_prob - naive_prob) >= 0.005  # solo mostrar si hay diferencia >0.5pp
-                    else ""
-                )
-            )
-
-            for game_label, pick in legs:
-                emoji   = CONFIDENCE_EMOJI.get(pick.confidence, "")
-                hit_str = f"{pick.hit_count_l10}/{pick.games_l10}"
-                parlay_lines.append(
-                    f"  {emoji} <b>{_h(pick.player)}</b> — {_h(pick.market)} {pick.side.upper()} {pick.line}"
-                    f"  <code>[{hit_str} L10]</code>"
-                )
-            parlay_lines.append("")
-
-        parlay_lines.append(
-            "<i>⚠️ Las combinadas multiplican riesgos. Apostá montos pequeños.</i>"
-        )
-
-    # ── SECCIÓN 4: Escalera del Día ───────────────────────────────────────────
-    escalera_lines: list[str] = []
+    # ── ESCALERA (optional) ──────────────────────────────────────────────────
     if escalera_data:
-        escalera_lines = _format_escalera_section(escalera_data)
+        lines += _format_escalera(escalera_data)
 
-    return (
-        "\n".join(summary_lines)
-        + ("\n" + "\n".join(consistency_lines) if consistency_lines else "")
-        + "\n"
-        + "\n".join(detail_lines)
-        + "\n".join(parlay_lines)
-        + ("\n" + "\n".join(escalera_lines) if escalera_lines else "")
-    )
+    lines.append("")
+    lines.append("<i>Apostá con responsabilidad. Solo con plata que puedas perder.</i>")
+
+    return "\n".join(lines)
 
 
-def _format_pick_detail(pick: PlayerPick) -> list[str]:
-    """Full analysis block for a single pick — shown in the detail section."""
-    emoji = CONFIDENCE_EMOJI.get(pick.confidence, "")
-    side_upper = pick.side.upper()
-    price_str = f" ({pick.price:+d})" if pick.price else ""
+def _format_pick(pick: PlayerPick) -> list[str]:
+    conf_emoji = CONFIDENCE_EMOJI.get(pick.confidence, "")
+    hit_pct    = pick.hit_count_l15 / pick.games_l15 * 100 if pick.games_l15 > 0 else 0.0
+    edge       = round(pick.avg_l15 - pick.line, 1)
+    edge_sign  = "+" if edge >= 0 else ""
+    price_str  = f"{pick.price:+d}" if pick.price else "-110"
 
-    lines = [
-        f"{emoji} <b>{_h(pick.player)} — {_h(pick.market)} {side_upper} {pick.line}</b>{price_str}",
-    ]
-
-    # Stats line
-    lines.append(
-        f"  <code>L5: {pick.avg_l5:.1f} | L10: {pick.avg_l10:.1f} | L20: {pick.avg_l20:.1f}"
-        f" | Hit L10: {pick.hit_count_l10}/{pick.games_l10} ({pick.hit_count_l10/pick.games_l10*100:.0f}%)</code>"
-    )
-
-    # EV + probability
-    ev_bar = _ev_bar(pick.ev_pct)
-    lines.append(
-        f"  📊 <b>EV: +{pick.ev_pct:.1f}%</b> {ev_bar} | "
-        f"Prob. modelo: {pick.model_prob*100:.0f}% | "
-        f"Mercado justo: {pick.fair_prob*100:.0f}%"
-    )
-
-    # Projection
-    sign = "+" if pick.edge >= 0 else ""
-    lines.append(f"  🎯 Proyección: <b>{pick.projection}</b> ({sign}{pick.edge} vs línea {pick.line})")
-
-    # Streak
-    if pick.consecutive_streak >= 3:
-        lines.append(
-            f"  🔁 Racha: {pick.consecutive_streak} partidos consecutivos {pick.side}"
-        )
-
-    # Hot / cold form
-    if pick.is_hot and pick.avg_l10 > 0:
-        lines.append(
-            f"  🔥 <b>En racha:</b> L5 {pick.avg_l5:.1f} vs L10 {pick.avg_l10:.1f}"
-            f" (+{((pick.avg_l5/pick.avg_l10-1)*100):.0f}% sobre su media)"
-        )
-    elif pick.is_cold and pick.avg_l10 > 0:
-        lines.append(
-            f"  🥶 <b>Racha fría:</b> L5 {pick.avg_l5:.1f} vs L10 {pick.avg_l10:.1f}"
-            f" (−{((1-pick.avg_l5/pick.avg_l10)*100):.0f}% bajo su media)"
-        )
-
-    # Minutes trend
-    if abs(pick.minutes_trend_pct) >= 10.0:
-        if pick.minutes_trend_pct > 0:
-            lines.append(f"  📈 Rol en expansión: +{pick.minutes_trend_pct:.0f}% minutos (L5 vs L10)")
-        else:
-            lines.append(f"  📉 Rol en reducción: {pick.minutes_trend_pct:.0f}% minutos (L5 vs L10)")
-
-    # Rest days
-    if not pick.is_b2b and pick.rest_days >= 7:
-        lines.append(f"  🦺 {pick.rest_days} días sin jugar — posible óxido")
-    elif not pick.is_b2b and pick.rest_days >= 4:
-        lines.append(f"  😴 Descansado: {pick.rest_days} días de descanso (+2.5% proy.)")
-
-    # Context flags
-    context_flags = []
-    if pick.pace_factor >= 1.03:
-        context_flags.append(f"ritmo elevado (+{(pick.pace_factor-1)*100:.1f}%)")
-    elif pick.pace_factor <= 0.97:
-        context_flags.append(f"ritmo lento ({(pick.pace_factor-1)*100:.1f}%)")
-    if pick.dvp_factor >= 1.04:
-        context_flags.append(f"defensa rival débil (+{(pick.dvp_factor-1)*100:.1f}%)")
-    elif pick.dvp_factor <= 0.97:
-        context_flags.append(f"defensa rival sólida ({(pick.dvp_factor-1)*100:.1f}%)")
-    if context_flags:
-        lines.append(f"  🧮 Contexto: {', '.join(context_flags)}")
-
-    # Blowout risk
-    if pick.blowout_risk:
-        lines.append("  ⚡ <b>Riesgo paliza:</b> favorito 12+ pts — podría salir en el 4to")
-
-    # Teammate absence
-    if pick.absence_boost > 1.0:
-        pct = round((pick.absence_boost - 1.0) * 100)
-        lines.append(f"  📈 Compañero ausente — uso proyectado +{pct}%")
-
-    # Rotation risk (irregular minutes)
-    if pick.rotation_risk:
-        lines.append(f"  🔄 <b>Rotación irregular:</b> varianza ±{pick.min_std:.0f} min (−7% proy.)")
-
-    # Foul trouble
-    if pick.foul_risk:
-        foul_parts = [f"{pick.avg_fouls:.1f} PF/j (prom. L10)"]
-        if pick.foul_out_count >= 2:
-            foul_parts.append(f"{pick.foul_out_count} foul-outs en últ. 20j")
-        if pick.foul_trouble_count >= 3:
-            foul_parts.append(f"salió temprano por faltas {pick.foul_trouble_count}x")
-        lines.append(f"  🟡 <b>Riesgo faltas:</b> {' | '.join(foul_parts)}")
-
-    # Injury
-    if pick.injury_status:
-        lines.append(f"  🚨 <b>Lesión:</b> {_h(pick.injury_status)}")
-
-    # B2B
-    if pick.is_b2b:
-        lines.append("  ⚠️ Back-to-back hoy (−7% proyectado)")
-
-    # Confidence
-    lines.append(f"  {emoji} Confianza: <b>{pick.confidence}</b>")
-
-    return lines
-
-
-def _ev_bar(ev_pct: float) -> str:
-    if ev_pct >= 15:
-        return "█████"
-    if ev_pct >= 10:
-        return "████░"
-    if ev_pct >= 7:
-        return "███░░"
-    if ev_pct >= 4:
-        return "██░░░"
-    return "█░░░░"
-
-
-def _format_consistency_section(picks: list[dict]) -> list[str]:
-    """
-    Render the '🎯 PICKS DE CONSISTENCIA' section.
-
-    Each pick dict: player, market, market_key, line, price,
-                    hits, games, hit_rate, avg, game_label.
-    """
     out = [
-        "━" * 30,
-        "🎯 <b>PICKS DE CONSISTENCIA</b>",
-        "━" * 30,
-        "<i>Sin modelos. Solo historial real: ¿cuántas veces superó la línea?</i>",
-        "",
+        "═══════════════════════",
+        f"🏀 <b>{_h(pick.player)}</b> | {_h(pick.market)} OVER {pick.line}",
+        (
+            f"📊 L15: {pick.hit_count_l15}/{pick.games_l15} ({hit_pct:.0f}%)"
+            f" | Prom: <b>{pick.avg_l15}</b> ({edge_sign}{edge} vs línea)"
+        ),
+        f"📈 L5: {pick.hit_count_l5}/{pick.games_l5} | Racha actual: {pick.consecutive_streak} seguidos",
+        f"💰 Precio: <code>{price_str}</code>",
+        f"{conf_emoji} Confianza: <b>{pick.confidence.upper()}</b>",
     ]
 
-    for p in picks:
-        hits     = p["hits"]
-        games    = p["games"]
-        pct      = round(p["hit_rate"] * 100)
-        avg      = p["avg"]
-        line     = p["line"]
-        market   = p["market"]
-        player   = p["player"]
-        price    = p.get("price", 0)
+    if pick.is_b2b:
+        out.append("⚠️ Back-to-back hoy — confianza reducida")
 
-        # Emoji ladder by hit rate
-        if pct >= 93:
-            emoji = "🔥"
-        elif pct >= 87:
-            emoji = "✅"
-        else:
-            emoji = "⚡"
+    if pick.injury_status and "out" not in pick.injury_status.lower():
+        out.append(f"🚨 Estado: {_h(pick.injury_status)}")
 
-        # American odds → readable string
-        if price > 0:
-            odds_str = f"+{price}"
-        elif price < 0:
-            odds_str = str(price)
-        else:
-            odds_str = ""
-        odds_part = f"  <code>{odds_str}</code>" if odds_str else ""
+    # Never-miss signal
+    if pick.min_l10 > pick.line:
+        out.append(f"💎 No falló ni una vez en los últimos 10 (mín: {pick.min_l10})")
 
-        out.append(
-            f"{emoji} <b>{_h(player)}</b> — {_h(market)} Over {line}{odds_part}"
-        )
-        out.append(
-            f"   <code>{hits}/{games} partidos ({pct}%)</code>"
-            f"  |  Prom. L{games}: <b>{avg:.1f}</b> {_h(market.lower())}"
-        )
-        out.append("")
-
-    out.append(
-        "<i>💡 Picks 100% basados en historial reciente. Verificá siempre el contexto del partido.</i>"
-    )
-    out.append("")
     return out
 
 
-def _format_escalera_section(escalera_data: dict) -> list[str]:
-    """
-    Render the '🏆 ESCALERA DEL DÍA 🪜' section from the escalera_data dict.
+def _format_parlay(parlay: dict) -> list[str]:
+    name   = parlay["name"]
+    legs   = parlay["legs"]
+    prob   = parlay.get("corr_joint_prob", parlay["hit_rate_product"])
+    emoji  = PARLAY_EMOJI.get(name, "🎯")
+    n_legs = len(legs)
 
-    Expected keys: player, stat_name, lines (list of 3 dicts), analysis, game_label.
-    Each line dict: {"line": float, "decimal": float, "units": int}
-    """
+    out = [f"{emoji} <b>{_h(name)}</b> ({n_legs} patas)"]
+
+    for game_label, pick in legs:
+        hit_pct  = pick.hit_count_l15 / pick.games_l15 * 100 if pick.games_l15 > 0 else 0.0
+        conf_e   = CONFIDENCE_EMOJI.get(pick.confidence, "")
+        out.append(
+            f"  └─ {conf_e} <b>{_h(pick.player)}</b>"
+            f" | Over {pick.line} {_h(pick.market)}"
+            f"  <code>L15: {pick.hit_count_l15}/{pick.games_l15} ({hit_pct:.0f}%)</code>"
+        )
+
+    out.append(
+        f"  📊 Prob. estimada: ~<b>{prob * 100:.0f}%</b>"
+        f"  <i>(multiplicación de hit rates)</i>"
+    )
+    return out
+
+
+def _format_escalera(escalera_data: dict) -> list[str]:
     player    = escalera_data["player"]
     stat_name = escalera_data["stat_name"]
-    lines     = escalera_data["lines"]    # list of 3 dicts
+    esc_lines = escalera_data["lines"]
     analysis  = escalera_data["analysis"]
 
     out = [
@@ -372,26 +191,18 @@ def _format_escalera_section(escalera_data: dict) -> list[str]:
         "🏆 <b>ESCALERA DEL DÍA</b> 🪜",
         "━" * 30,
         "",
-        f"<b>{_h(player)} escalera de {_h(stat_name)}</b> 🪜",
+        f"<b>{_h(player)} · escalera de {_h(stat_name)}</b>",
     ]
-
-    for entry in lines:
+    for entry in esc_lines:
         line_val = entry["line"]
         decimal  = entry["decimal"]
         units    = entry["units"]
-        # Format decimal odds: show 2 decimal places for values < 10, 1 for higher
-        if decimal < 10:
-            odds_str = f"{decimal:.2f}"
-        else:
-            odds_str = f"{decimal:.1f}"
-        out.append(
-            f"Over {line_val} {_h(stat_name)} | {odds_str} ({units} unidades)"
-        )
+        odds_str = f"{decimal:.2f}" if decimal < 10 else f"{decimal:.1f}"
+        out.append(f"Over {line_val} {_h(stat_name)} | {odds_str} ({units} unidades)")
 
     out.append("")
     out.append(f"<i>{_h(analysis)}</i>")
     out.append("")
-
     return out
 
 

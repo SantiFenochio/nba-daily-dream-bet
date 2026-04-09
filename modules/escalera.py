@@ -114,8 +114,8 @@ def _escalera_score(pick: PlayerPick) -> float:
     """
     Score a pick for escalera suitability.
 
-    Prefers: preferred markets, weak defense, high ceiling relative to line,
-    confident model, no B2B, no blowout risk, no irregular rotation.
+    Prefers: preferred markets, high ceiling relative to line,
+    confident model, no B2B, consistent hit rate.
     """
     # Market preference (rebounds > assists > points > others)
     market_pref = 0.0
@@ -127,24 +127,15 @@ def _escalera_score(pick: PlayerPick) -> float:
     # How much room above the line (ceiling factor)
     ceiling = pick.avg_l5 / max(pick.line, 1.0)
 
-    # Weak defense is a better spot for a ladder
-    dvp_bonus = (pick.dvp_factor - 1.0) * 5.0
-
-    # Model confidence
-    prob_bonus = pick.model_prob * 2.0
+    # Hit rate as confidence proxy (replaces model_prob)
+    hit_rate = pick.hit_count_l15 / max(pick.games_l15, 1)
+    prob_bonus = hit_rate * 2.0
 
     # Penalties
-    b2b_penalty      = -1.5 if pick.is_b2b else 0.0
-    blowout_penalty  = -2.0 if pick.blowout_risk else 0.0
-    conf_bonus       = _CONFIDENCE_WEIGHT.get(pick.confidence, 0.0)
+    b2b_penalty = -1.5 if pick.is_b2b else 0.0
+    conf_bonus  = _CONFIDENCE_WEIGHT.get(pick.confidence, 0.0)
 
-    # Penalise irregular-rotation players (hasattr guard for safety)
-    rotation_penalty = -1.0 if getattr(pick, "rotation_risk", False) else 0.0
-
-    return (
-        market_pref + ceiling + dvp_bonus + prob_bonus
-        + b2b_penalty + blowout_penalty + conf_bonus + rotation_penalty
-    )
+    return market_pref + ceiling + prob_bonus + b2b_penalty + conf_bonus
 
 
 def _select_best_pick(picks_by_game: dict[str, list[PlayerPick]]) -> PlayerPick | None:
@@ -157,45 +148,33 @@ def _select_best_pick(picks_by_game: dict[str, list[PlayerPick]]) -> PlayerPick 
 # ── Analysis paragraph ────────────────────────────────────────────────────────
 
 def _generate_analysis(pick: PlayerPick, player_logs: dict[str, list[dict]]) -> str:
-    """Build a 4-6 sentence analyst-style analysis for the escalera."""
-    stat = MARKET_TO_STAT_NAME.get(pick.market_key, pick.market)
+    """Build a 4-5 sentence analyst-style analysis for the escalera."""
+    stat   = MARKET_TO_STAT_NAME.get(pick.market_key, pick.market)
     player = pick.player
+    avg_l15 = pick.avg_l15
     sentences: list[str] = []
 
-    # 1. Opening: spot quality + defense context
-    dvp_str = ""
-    if pick.dvp_factor >= 1.05:
-        dvp_str = (
-            f", enfrentando a una defensa que cede un "
-            f"{(pick.dvp_factor - 1) * 100:.0f}% más de {stat} por partido que el promedio de liga"
-        )
-    elif pick.dvp_factor >= 1.02:
-        dvp_str = ", ante una defensa rival permisiva en esta categoría"
-    elif pick.dvp_factor <= 0.97:
-        dvp_str = " (defensa rival sólida, pero el matchup individual compensa)"
-
-    pace_str = ""
-    if pick.pace_factor >= 1.03:
-        pace_str = f" y ritmo de partido elevado (+{(pick.pace_factor - 1) * 100:.0f}% sobre la media)"
-
+    # 1. Opening: consistency signal
+    hit_rate_l15 = pick.hit_count_l15 / max(pick.games_l15, 1) * 100
     sentences.append(
-        f"{player} es el candidato ideal para la escalera del día"
-        f"{dvp_str}{pace_str}."
+        f"{player} es el candidato ideal para la escalera del día: "
+        f"superó {pick.line} {stat} en {pick.hit_count_l15} de sus últimos "
+        f"{pick.games_l15} partidos ({hit_rate_l15:.0f}%)."
     )
 
     # 2. Recent production vs line
-    hit_rate = pick.hit_count_l10 / max(pick.games_l10, 1) * 100
+    hit_rate_l10 = pick.hit_count_l10 / max(pick.games_l10, 1) * 100
     sentences.append(
-        f"En sus últimos {pick.games_l10} partidos promedia {pick.avg_l10:.1f} {stat} "
-        f"y superó la línea base ({pick.line}) en el {hit_rate:.0f}% de las ocasiones."
+        f"En los últimos {pick.games_l15} partidos promedia {avg_l15:.1f} {stat} "
+        f"y superó la línea base en el {hit_rate_l10:.0f}% de los últimos {pick.games_l10}."
     )
 
     # 3. Form or streak
-    if pick.avg_l5 > pick.avg_l10 * 1.08:
-        diff_pct = ((pick.avg_l5 / pick.avg_l10) - 1) * 100
+    if avg_l15 > 0 and pick.avg_l5 > avg_l15 * 1.08:
+        diff_pct = ((pick.avg_l5 / avg_l15) - 1) * 100
         sentences.append(
             f"Su forma reciente es destacada: {pick.avg_l5:.1f} de promedio en los últimos 5 partidos "
-            f"(+{diff_pct:.0f}% sobre su L10 de {pick.avg_l10:.1f})."
+            f"(+{diff_pct:.0f}% sobre su L15 de {avg_l15:.1f})."
         )
     elif pick.consecutive_streak >= 3:
         sentences.append(
@@ -203,32 +182,13 @@ def _generate_analysis(pick: PlayerPick, player_logs: dict[str, list[dict]]) -> 
             f"mostrando una consistencia que refuerza la base de la escalera."
         )
     else:
+        edge = round(avg_l15 - pick.line, 1)
         sentences.append(
-            f"El modelo proyecta {pick.projection} {stat} para hoy, "
-            f"con un margen de +{pick.edge} sobre la línea base."
+            f"Promedia {avg_l15:.1f} {stat} en L15, "
+            f"con un margen de +{edge} sobre la línea base."
         )
 
-    # 4. Contextual boosters (absence, rest, minutes trend)
-    if pick.absence_boost > 1.0:
-        boost_pct = round((pick.absence_boost - 1.0) * 100)
-        sentences.append(
-            f"La ausencia de compañeros de equipo amplía su rol esperado "
-            f"(+{boost_pct}% en uso proyectado), lo que incrementa el techo de la escalera."
-        )
-    elif not pick.is_b2b and pick.rest_days >= 4:
-        sentences.append(
-            f"Llega descansado ({pick.rest_days} días sin jugar), "
-            f"lo que históricamente se traduce en mayor intensidad y minutos en cancha."
-        )
-
-    minutes_trend = getattr(pick, "minutes_trend_pct", 0.0)
-    if minutes_trend >= 10.0:
-        sentences.append(
-            f"Su rol está en expansión (+{minutes_trend:.0f}% minutos L5 vs L10), "
-            f"lo que abre margen para las líneas superiores de la escalera."
-        )
-
-    # 5. Escalera rationale (always last)
+    # 4. Escalera rationale (always last)
     sentences.append(
         f"La estructura 20/8/2 unidades concentra el capital en la línea más probable "
         f"mientras mantiene exposición a las cuotas altas superiores, "
