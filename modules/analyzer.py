@@ -166,7 +166,8 @@ def analyze_player_props(
     seen_props: set[tuple] = set()
 
     for rec in prop_records:
-        if rec.get("side") != "over":
+        # Case-insensitive check — Odds API returns "Over" (capital O)
+        if rec.get("side", "").lower() != "over":
             continue
 
         player     = rec["player"]
