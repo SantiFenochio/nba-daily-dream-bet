@@ -97,17 +97,19 @@ def _parse_byteam(data: dict) -> dict[str, dict]:
                         return i
         return None
 
-    # Own team (first general category)
-    own_cat = categories[0] if categories else None
-    # Opponent (second general category, or first one with "opponent" in name)
-    opp_cat = None
-    for cat in categories:
-        name = (cat.get("name") or "").lower()
-        if "opponent" in name or "opp" in name:
-            opp_cat = cat
-            break
-    if opp_cat is None and len(categories) >= 2:
-        opp_cat = categories[1]
+    # ESPN byteam layout (confirmed from live data):
+    #   [0] general (own)   — REB, AST, TECH, GP, PF stats
+    #   [1] general (opp)   — same schema, empty labels in some seasons
+    #   [2] defensive (own) — DR, STL, BLK
+    #   [3] defensive (opp)
+    #   [4] offensive (own) ← PPG lives here
+    #   [5] offensive (opp) ← opponent PPG (= points we allow)
+    #   [6] differential
+    # Strategy: find first+second "offensive" named categories
+
+    offensive_cats = [c for c in categories if (c.get("name") or "").lower() == "offensive"]
+    own_cat = offensive_cats[0] if len(offensive_cats) >= 1 else (categories[0] if categories else None)
+    opp_cat = offensive_cats[1] if len(offensive_cats) >= 2 else (categories[1] if len(categories) >= 2 else None)
 
     if not own_cat:
         print("[context] ESPN byteam: no categories found")
