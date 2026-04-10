@@ -494,7 +494,8 @@
       "model_prob": 0.0,
       "confidence": "Alta",
       "game": "Miami Heat @ Toronto Raptors",
-      "hit": null
+      "actual": 17,
+      "hit": true
     },
     {
       "player": "Pelle Larsson",
@@ -506,7 +507,8 @@
       "model_prob": 0.0,
       "confidence": "Alta",
       "game": "Miami Heat @ Toronto Raptors",
-      "hit": null
+      "actual": 12,
+      "hit": false
     },
     {
       "player": "Ja'Kobe Walter",
@@ -518,7 +520,8 @@
       "model_prob": 0.0,
       "confidence": "Media",
       "game": "Miami Heat @ Toronto Raptors",
-      "hit": null
+      "actual": 2,
+      "hit": true
     },
     {
       "player": "Sandro Mamukelashvili",
@@ -530,7 +533,8 @@
       "model_prob": 0.0,
       "confidence": "Media",
       "game": "Miami Heat @ Toronto Raptors",
-      "hit": null
+      "actual": 10,
+      "hit": false
     },
     {
       "player": "Paul George",
@@ -542,7 +546,8 @@
       "model_prob": 0.0,
       "confidence": "Alta",
       "game": "Philadelphia 76ers @ Houston Rockets",
-      "hit": null
+      "actual": 1,
+      "hit": false
     },
     {
       "player": "Jabari Smith Jr",
@@ -554,7 +559,8 @@
       "model_prob": 0.0,
       "confidence": "Alta",
       "game": "Philadelphia 76ers @ Houston Rockets",
-      "hit": null
+      "actual": 19,
+      "hit": true
     },
     {
       "player": "Dominick Barlow",
@@ -566,7 +572,8 @@
       "model_prob": 0.0,
       "confidence": "Media",
       "game": "Philadelphia 76ers @ Houston Rockets",
-      "hit": null
+      "actual": 21,
+      "hit": true
     },
     {
       "player": "Quentin Grimes",
@@ -578,7 +585,8 @@
       "model_prob": 0.0,
       "confidence": "Media",
       "game": "Philadelphia 76ers @ Houston Rockets",
-      "hit": null
+      "actual": 4,
+      "hit": false
     },
     {
       "player": "Neemias Queta",
@@ -590,7 +598,8 @@
       "model_prob": 0.0,
       "confidence": "Media",
       "game": "Boston Celtics @ New York Knicks",
-      "hit": null
+      "actual": 2,
+      "hit": true
     },
     {
       "player": "Neemias Queta",
@@ -602,7 +611,8 @@
       "model_prob": 0.0,
       "confidence": "Media",
       "game": "Boston Celtics @ New York Knicks",
-      "hit": null
+      "actual": 22,
+      "hit": true
     },
     {
       "player": "Neemias Queta",
@@ -614,7 +624,8 @@
       "model_prob": 0.0,
       "confidence": "Media",
       "game": "Boston Celtics @ New York Knicks",
-      "hit": null
+      "actual": 12,
+      "hit": true
     },
     {
       "player": "Karl-Anthony Towns",
@@ -626,7 +637,8 @@
       "model_prob": 0.0,
       "confidence": "Media",
       "game": "Boston Celtics @ New York Knicks",
-      "hit": null
+      "actual": 20,
+      "hit": false
     },
     {
       "player": "Gui Santos",
@@ -638,7 +650,8 @@
       "model_prob": 0.0,
       "confidence": "Media",
       "game": "Los Angeles Lakers @ Golden State Warriors",
-      "hit": null
+      "actual": 3,
+      "hit": false
     }
   ]
 }

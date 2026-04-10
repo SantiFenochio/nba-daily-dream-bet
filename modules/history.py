@@ -66,6 +66,7 @@ def record_picks(date_str: str, picks_by_game: dict, history: dict) -> dict:
                 "line":       float(pick.line),
                 "ev_pct":     round(pick.ev_pct, 2),
                 "model_prob": round(pick.model_prob, 4),
+                "score":      round(pick.score, 4),
                 "confidence": pick.confidence,
                 "game":       game,
                 "hit":        None,

@@ -10,6 +10,8 @@ Logic:
   6. Cap at MAX_TOTAL_PICKS (15), MAX_PICKS_PER_GAME (4) per game.
 """
 
+import statistics
+from collections import Counter
 from dataclasses import dataclass
 from modules.fetch_player_stats import get_stat_value, parse_minutes
 from modules.fetch_props import MARKET_LABELS
@@ -29,6 +31,24 @@ MEDIA_EDGE     = 0.05   # avg L15 >= line * 1.05 (+5%)
 # Team context defaults (league averages 2025-26)
 LEAGUE_AVG_OPP_PTS = 114.0
 LEAGUE_AVG_PACE    = 99.5
+
+# ── Steals market filter ──────────────────────────────────────────────────────
+STEALS_OVER_HIGH_LINE  = 1.5   # Over >= this line requires stricter thresholds
+STEALS_MIN_HIT_L15     = 0.73  # min L15 hit rate for steals Over >= 1.5
+STEALS_MIN_HIT_L5      = 0.60  # min L5 hit rate for steals Over >= 1.5
+
+# ── Minutes variability penalty ───────────────────────────────────────────────
+MIN_CV_PENALTY          = 0.40  # coeff. of variation above this → penalize
+MIN_CV_SCORE_FACTOR     = 0.88  # score multiplier for high-variability players
+
+# ── Blowout risk for bench players ────────────────────────────────────────────
+BLOWOUT_SPREAD_THRESHOLD = 12.0  # abs(spread) > this = blowout risk
+BLOWOUT_BENCH_MIN_AVG    = 28.0  # players averaging < this are role/bench players
+BLOWOUT_SCORE_FACTOR     = 0.90  # score penalty for bench in blowout games
+
+# ── Multi-market same-player boost ────────────────────────────────────────────
+MULTI_PICK_MIN_COUNT  = 3     # minimum number of picks from same player to boost
+MULTI_PICK_SCORE_BOOST = 1.06  # score multiplier when player hits 3+ markets
 
 # Markets where opponent defensive quality matters (offensive props)
 OFFENSIVE_MARKETS = {
@@ -78,7 +98,7 @@ class PlayerPick:
 
     injury_status: str | None = None
 
-    # Compatibility with history.py (not computed in simple mode)
+    # EV% = (model_prob / fair_implied - 1)*100 | model_prob = 0.65*L15 + 0.35*L5
     ev_pct: float = 0.0
     model_prob: float = 0.0
 
@@ -158,6 +178,67 @@ def _get_proj_stat(proj: dict, market_key: str) -> float | None:
     return None
 
 
+# ── EV helpers ────────────────────────────────────────────────────────────────
+
+def _american_to_implied(price: int) -> float:
+    """Convert American odds to raw implied probability (with vig)."""
+    if price >= 100:
+        return 100.0 / (price + 100.0)
+    return abs(price) / (abs(price) + 100.0)
+
+
+def _devig_implied(price_over: int, price_under: int | None) -> float:
+    """Two-sided devig: returns fair implied probability for the Over side."""
+    p_over = _american_to_implied(price_over)
+    if price_under is not None:
+        p_under = _american_to_implied(price_under)
+        total = p_over + p_under
+        if total > 0:
+            return p_over / total
+    return p_over  # fallback: single-sided (no devig available)
+
+
+def _compute_model_prob(stats: dict) -> float:
+    """
+    Blend L15 (stable) and L5 (recent form) hit rates into a model probability.
+    Weights: 65% L15, 35% L5.
+    """
+    hr_l15 = stats["hit_count_l15"] / stats["games_l15"] if stats["games_l15"] > 0 else 0.0
+    hr_l5  = stats["hit_count_l5"]  / stats["games_l5"]  if stats["games_l5"]  > 0 else 0.0
+    return round(hr_l15 * 0.65 + hr_l5 * 0.35, 4)
+
+
+def _compute_ev_pct(model_prob: float, price: int, opposite_price: int | None) -> float:
+    """
+    EV% = (model_prob / fair_implied_prob - 1) * 100
+    Positive EV means the model sees more value than the market implies.
+    """
+    fair_implied = _devig_implied(price, opposite_price)
+    if fair_implied <= 0:
+        return 0.0
+    return round((model_prob / fair_implied - 1) * 100, 2)
+
+
+def _get_minutes_cv(logs: list[dict]) -> float:
+    """
+    Returns coefficient of variation (std/mean) of minutes in last 15 games.
+    High CV = inconsistent minutes = high-variability bench/role player.
+    """
+    minutes: list[float] = []
+    for g in logs[:15]:
+        val = g.get("MIN")
+        if val is not None:
+            m = parse_minutes(val)
+            if m > 0:
+                minutes.append(m)
+    if len(minutes) < 5:
+        return 0.0
+    avg = sum(minutes) / len(minutes)
+    if avg <= 0:
+        return 0.0
+    return statistics.stdev(minutes) / avg
+
+
 def _assign_confidence(hit_rate_l15: float, avg_l15: float, line: float) -> str:
     edge_ratio = avg_l15 / line if line > 0 else 1.0
     if hit_rate_l15 >= ALTA_HIT_RATE and edge_ratio >= (1.0 + ALTA_EDGE):
@@ -194,12 +275,14 @@ def analyze_player_props(
     """
     # Build game_label → {team_abbr, ...} map
     game_team_abbrs: dict[str, set[str]] = {}
+    game_label_to_id: dict[str, str] = {}
     for g in games:
         label = f"{g['visitor_team']['full_name']} @ {g['home_team']['full_name']}"
         game_team_abbrs[label] = {
             g["home_team"]["abbreviation"],
             g["visitor_team"]["abbreviation"],
         }
+        game_label_to_id[label] = g["id"]
 
     ctx_hits = 0   # count picks that received a context adjustment
     proj_hits = 0  # count picks that received a projection adjustment
@@ -212,12 +295,13 @@ def analyze_player_props(
         if rec.get("side", "").lower() != "over":
             continue
 
-        player     = rec["player"]
-        market_key = rec["market_key"]
-        line       = float(rec["line"])
-        price      = rec.get("price") or -110
-        game_label = rec.get("game_label", "")
-        market     = MARKET_LABELS.get(market_key, market_key)
+        player         = rec["player"]
+        market_key     = rec["market_key"]
+        line           = float(rec["line"])
+        price          = rec.get("price") or -110
+        opposite_price = rec.get("opposite_price")
+        game_label     = rec.get("game_label", "")
+        market         = MARKET_LABELS.get(market_key, market_key)
 
         # Deduplicate (player, market, line)
         prop_key = (player, market_key, line)
@@ -250,6 +334,12 @@ def analyze_player_props(
         hit_rate_l15 = stats["hit_count_l15"] / stats["games_l15"]
         confidence   = _assign_confidence(hit_rate_l15, stats["avg_l15"], line)
 
+        # ── Steals Over high-line: extra strict (market muy volátil) ──────────
+        if market_key == "player_steals" and line >= STEALS_OVER_HIGH_LINE:
+            hr_l5 = stats["hit_count_l5"] / stats["games_l5"] if stats["games_l5"] > 0 else 0.0
+            if hit_rate_l15 < STEALS_MIN_HIT_L15 or hr_l5 < STEALS_MIN_HIT_L5:
+                continue
+
         # B2B: downgrade confidence one level
         is_b2b = bool(game_team_abbrs.get(game_label, set()) & b2b_team_abbrs)
         if is_b2b:
@@ -261,6 +351,13 @@ def analyze_player_props(
         # Base score: hit rate primary, edge secondary
         edge_ratio = (stats["avg_l15"] / line) if line > 0 else 1.0
         score = hit_rate_l15 * 0.70 + min(edge_ratio - 1.0, 0.50) * 0.30
+
+        # ── Minutes variability penalty (bench/role players con minutos erráticos)
+        min_cv = _get_minutes_cv(logs)
+        if min_cv > MIN_CV_PENALTY:
+            score *= MIN_CV_SCORE_FACTOR
+            if confidence == "Alta":
+                confidence = "Media"
 
         # ── Matchup multiplier (team_context) ─────────────────────────────────
         if team_context:
@@ -319,6 +416,20 @@ def analyze_player_props(
                     score *= 0.93
                     proj_hits += 1
 
+        # ── Blowout risk: penaliza bench players en partidos muy desiguales ─────
+        avg_min = _get_avg_minutes(logs)
+        if avg_min < BLOWOUT_BENCH_MIN_AVG and game_lines:
+            game_id_for_lines = game_label_to_id.get(game_label)
+            if game_id_for_lines:
+                gl = game_lines.get(game_id_for_lines, {})
+                spread = gl.get("spread")
+                if spread is not None and abs(spread) > BLOWOUT_SPREAD_THRESHOLD:
+                    score *= BLOWOUT_SCORE_FACTOR
+
+        # ── Compute real model probability and EV% ────────────────────────────
+        m_prob = _compute_model_prob(stats)
+        ev     = _compute_ev_pct(m_prob, price, opposite_price)
+
         pick = PlayerPick(
             player=player,
             game_label=game_label,
@@ -341,12 +452,26 @@ def analyze_player_props(
             is_b2b=is_b2b,
             injury_status=inj,
             score=round(score, 4),
-            ev_pct=0.0,
+            ev_pct=ev,
+            model_prob=m_prob,
         )
         candidates.append(pick)
 
     print(f"[analyzer] {len(candidates)} candidates | "
           f"context adjustments: {ctx_hits} | projection adjustments: {proj_hits}")
+
+    # ── Multi-market same-player boost ────────────────────────────────────────
+    # When the model identifies 3+ markets for the same player, it signals strong
+    # consistency. Boost score slightly so they cluster together in the final output.
+    player_pick_count = Counter(p.player for p in candidates)
+    multi_boosted = 0
+    for pick in candidates:
+        if (player_pick_count[pick.player] >= MULTI_PICK_MIN_COUNT
+                and pick.confidence in ("Alta", "Media")):
+            pick.score = round(pick.score * MULTI_PICK_SCORE_BOOST, 4)
+            multi_boosted += 1
+    if multi_boosted:
+        print(f"[analyzer] Multi-market boost applied to {multi_boosted} picks")
 
     # Sort by score descending
     candidates.sort(key=lambda p: -p.score)
