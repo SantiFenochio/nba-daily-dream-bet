@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,12 @@ from modules.history import (
     backtest_yesterday, get_calibration_factors,
 )
 from modules.telegram_client import send_telegram_message
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 load_dotenv()
 
@@ -224,17 +231,52 @@ async def main():
         history = record_picks(date_str, picks_by_game, history)
         save_history(history)
 
-        # ── 14. Format and send ───────────────────────────────────────────────
-        print("[main] Formatting and sending message...")
-        message = format_message(
-            picks_by_game,
-            game_times=game_times,
-            fallback_mode=fallback_mode,
-            parlays=parlays,
-            accuracy=accuracy,
-            escalera_data=escalera_data,
-            consistency_picks=consistency or None,
-        )
+        # ── 14. Multi-Agent Orchestrator (Claude) o fallback a formatter.py ──
+        message = ""
+
+        from agents.orchestrator import Orchestrator
+        if Orchestrator.is_available():
+            print("[main] ANTHROPIC_API_KEY detectada — iniciando pipeline multi-agent...")
+            try:
+                orch = Orchestrator()
+                orch_result = orch.run(
+                    picks_by_game=picks_by_game,
+                    player_logs=player_logs,
+                    injury_statuses=injury_statuses,
+                    projections=projections,
+                    prop_records=prop_records,
+                    games=games,
+                    game_lines=game_lines,
+                    parlays=parlays,
+                    escalera_data=escalera_data,
+                    consistency_picks=consistency or None,
+                    accuracy=accuracy,
+                    history=history,
+                    date_str=date_str,
+                    fallback_mode=fallback_mode,
+                )
+                message = orch_result.message
+                # Usar parlays optimizados (con Cholesky MC) si están disponibles
+                if orch_result.enhanced_parlays:
+                    parlays = orch_result.enhanced_parlays
+                print(f"[main] Orchestrator completado — mensaje: {len(message)} chars")
+            except Exception as orch_exc:
+                print(f"[main] Orchestrator falló, usando formatter.py: {orch_exc}")
+                message = ""
+
+        # Fallback: usar formatter.py clásico si no hay Orchestrator o falló
+        if not message:
+            print("[main] Generando mensaje con formatter.py (modo clásico)...")
+            message = format_message(
+                picks_by_game,
+                game_times=game_times,
+                fallback_mode=fallback_mode,
+                parlays=parlays,
+                accuracy=accuracy,
+                escalera_data=escalera_data,
+                consistency_picks=consistency or None,
+            )
+
         await send_telegram_message(message)
         print("[main] Done.")
 

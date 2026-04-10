@@ -260,6 +260,7 @@ def analyze_player_props(
     market_ev_multipliers=None,
     min_ev_threshold=None,
     projections=None,
+    claude_refinements: dict[str, dict] | None = None,
 ) -> dict[str, list[PlayerPick]]:
     """
     Analyze player props and return picks_by_game.
@@ -497,5 +498,30 @@ def analyze_player_props(
             continue
         game_picks.append(pick)
         total += 1
+
+    # ── Claude qualitative refinements (optional, injected by Orchestrator) ──────
+    # Refinements are score multipliers + optional confidence overrides produced by
+    # the multi-agent system. They never replace the base quantitative logic — they
+    # only nudge scores based on qualitative context (news, ramp-up, blowout, etc.).
+    # Key format: "player_name|market_key"  →  {"score_factor": float, "confidence": str}
+    if claude_refinements:
+        refined_count = 0
+        for game_picks in picks_by_game.values():
+            for pick in game_picks:
+                key = f"{pick.player}|{pick.market_key}"
+                ref = claude_refinements.get(key)
+                if not ref:
+                    continue
+                factor = float(ref.get("score_factor", 1.0))
+                # Clamp to safe range: ±25% max adjustment over base score
+                factor = max(0.75, min(1.25, factor))
+                if abs(factor - 1.0) > 0.005:
+                    pick.score = round(pick.score * factor, 4)
+                    refined_count += 1
+                conf_override = ref.get("confidence_override")
+                if conf_override in ("Alta", "Media", "Baja"):
+                    pick.confidence = conf_override
+        if refined_count:
+            print(f"[analyzer] Claude refinements applied to {refined_count} picks")
 
     return picks_by_game
