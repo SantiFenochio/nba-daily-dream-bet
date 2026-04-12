@@ -850,5 +850,124 @@
       "game": "Oklahoma City Thunder @ Denver Nuggets",
       "hit": null
     }
+  ],
+  "2026-04-12": [
+    {
+      "player": "Bruce Brown",
+      "market": "Triples",
+      "market_key": "player_threes",
+      "side": "over",
+      "line": 0.5,
+      "ev_pct": 1.8,
+      "model_prob": 0.6043,
+      "score": 0.715,
+      "confidence": "Media",
+      "game": "Denver Nuggets @ San Antonio Spurs",
+      "hit": null
+    },
+    {
+      "player": "Nikola Jokic",
+      "market": "Puntos",
+      "market_key": "player_points",
+      "side": "over",
+      "line": 16.5,
+      "ev_pct": 42.0,
+      "model_prob": 0.71,
+      "score": 0.6762,
+      "confidence": "Media",
+      "game": "Denver Nuggets @ San Antonio Spurs",
+      "hit": null
+    },
+    {
+      "player": "Jalen Johnson",
+      "market": "Triples",
+      "market_key": "player_threes",
+      "side": "over",
+      "line": 1.5,
+      "ev_pct": 15.63,
+      "model_prob": 0.59,
+      "score": 0.6836,
+      "confidence": "Media",
+      "game": "Atlanta Hawks @ Miami Heat",
+      "hit": null
+    },
+    {
+      "player": "Ausar Thompson",
+      "market": "Asistencias",
+      "market_key": "player_assists",
+      "side": "over",
+      "line": 2.5,
+      "ev_pct": 42.61,
+      "model_prob": 0.7567,
+      "score": 0.6328,
+      "confidence": "Media",
+      "game": "Detroit Pistons @ Indiana Pacers",
+      "hit": null
+    },
+    {
+      "player": "Jakob Poeltl",
+      "market": "Pts+Ast",
+      "market_key": "player_points_assists",
+      "side": "over",
+      "line": 10.5,
+      "ev_pct": 41.28,
+      "model_prob": 0.7207,
+      "score": 0.6196,
+      "confidence": "Media",
+      "game": "Brooklyn Nets @ Toronto Raptors",
+      "hit": null
+    },
+    {
+      "player": "Jakob Poeltl",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 15.5,
+      "ev_pct": 16.14,
+      "model_prob": 0.6043,
+      "score": 0.525,
+      "confidence": "Media",
+      "game": "Brooklyn Nets @ Toronto Raptors",
+      "hit": null
+    },
+    {
+      "player": "Wendell Carter Jr",
+      "market": "Pts+Ast",
+      "market_key": "player_points_assists",
+      "side": "over",
+      "line": 12.5,
+      "ev_pct": 43.15,
+      "model_prob": 0.6867,
+      "score": 0.5992,
+      "confidence": "Media",
+      "game": "Orlando Magic @ Boston Celtics",
+      "hit": null
+    },
+    {
+      "player": "Tyrese Maxey",
+      "market": "Reb+Ast",
+      "market_key": "player_rebounds_assists",
+      "side": "over",
+      "line": 10.5,
+      "ev_pct": 27.24,
+      "model_prob": 0.6975,
+      "score": 0.5792,
+      "confidence": "Media",
+      "game": "Milwaukee Bucks @ Philadelphia 76ers",
+      "hit": null
+    },
+    {
+      "player": "Precious Achiuwa",
+      "market": "PRA",
+      "market_key": "player_points_rebounds_assists",
+      "side": "over",
+      "line": 20.5,
+      "ev_pct": 32.0,
+      "model_prob": 0.66,
+      "score": 0.5583,
+      "confidence": "Media",
+      "game": "Sacramento Kings @ Portland Trail Blazers",
+      "hit": null
+    }
   ]
 }
