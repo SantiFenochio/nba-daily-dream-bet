@@ -116,6 +116,7 @@ def _escalera_score(pick: PlayerPick) -> float:
 
     Prefers: preferred markets, high ceiling relative to line,
     confident model, no B2B, consistent hit rate.
+    DTD / Questionable players are heavily penalized (DNP risk on a ladder is catastrophic).
     """
     # Market preference (rebounds > assists > points > others)
     market_pref = 0.0
@@ -133,9 +134,11 @@ def _escalera_score(pick: PlayerPick) -> float:
 
     # Penalties
     b2b_penalty = -1.5 if pick.is_b2b else 0.0
+    # DTD/Questionable: very strong penalty — a DNP destroys all escalera units
+    dtd_penalty = -5.0 if getattr(pick, "is_dtd", False) else 0.0
     conf_bonus  = _CONFIDENCE_WEIGHT.get(pick.confidence, 0.0)
 
-    return market_pref + ceiling + prob_bonus + b2b_penalty + conf_bonus
+    return market_pref + ceiling + prob_bonus + b2b_penalty + dtd_penalty + conf_bonus
 
 
 def _select_best_pick(picks_by_game: dict[str, list[PlayerPick]]) -> PlayerPick | None:

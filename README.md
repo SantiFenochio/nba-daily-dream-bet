@@ -51,15 +51,6 @@ Para cada jugador/línea se computan:
 - **Mínimo L10** — el piso de los últimos 10 partidos (consistencia)
 - **Racha activa** — partidos consecutivos superando la línea
 
-### Ajustes de contexto
-
-| Factor | Efecto |
-|---|---|
-| Back-to-back | Baja confianza un nivel (Alta→Media, Media→Baja) |
-| Pace del partido | Multiplicador dinámico vs promedio liga |
-| DEF_RATING rival | Multiplicador dinámico en mercados ofensivos |
-| Proyección SportsData.io | Multiplica si proyección supera/cae bajo la línea |
-
 ### Niveles de confianza
 
 | Nivel | Criterio |
@@ -68,18 +59,65 @@ Para cada jugador/línea se computan:
 | ⚡ Media | Hit rate L15 ≥ 67% **y** promedio L15 ≥ línea × 1.05 |
 | ❄️ Baja | Por debajo de Media (solo incluidos si hay cupo) |
 
+### Ajustes de contexto
+
+| Factor | Efecto |
+|---|---|
+| Back-to-back | Baja confianza un nivel (Alta→Media, Media→Baja) |
+| **Day-To-Day / Questionable** | **Baja confianza un nivel + penalty en score** |
+| Pace del partido | Multiplicador dinámico vs promedio liga |
+| DEF_RATING rival | Multiplicador dinámico en mercados ofensivos |
+| Proyección SportsData.io | Multiplica si proyección supera/cae bajo la línea |
+| **L5 vs L15 divergencia** | **Penaliza si forma reciente cayó vs histórico** |
+
 ### Filtros de calidad
 
 - Mínimo 20 minutos promedio (filtra garbage time)
 - Mínimo 5 juegos en el historial
+- **Máximo 2 picks por jugador** (evita cascada si un jugador falla)
 - Máximo 4 picks por partido, 15 en total
 - EV mínimo: 2% (con fallback a 0% si ningún pick lo supera)
+
+### Penalizaciones específicas por mercado
+
+| Mercado | Regla |
+|---|---|
+| Robos Over ≥ 1.5 | L15 ≥ 73% **y** L5 ≥ 60% (stricter — alta varianza) |
+| **Triples Over ≤ 1.0** | **Score × 0.88 — línea muy baja = señal débil** |
+
+### Blowout risk
+
+| Situación | Efecto |
+|---|---|
+| Bench player (<28 min avg) en partido con spread >12 | Score × 0.90 (general) |
+| **Star player en spread >12 + mercado de asistencias** | **Score × 0.93 + baja confianza** |
+
+> **Lección aprendida (10/04/2026):** Evan Mobley tenía racha de 10 seguidos en asistencias. El partido terminó en blowout (Hawks 124 - Cavaliers 102) y terminó con 1 asistencia. El game flow en blowouts destruye las asistencias incluso de estrellas.
+
+### L5 divergence penalty
+
+Si el hit rate reciente (L5) cayó significativamente vs el histórico (L15):
+
+| Ratio L5/L15 | Efecto |
+|---|---|
+| < 0.60 (severe) | Score × 0.87 + baja confianza un nivel |
+| < 0.75 (mild) | Score × 0.93 |
 
 ### Calibración por backtesting
 
 El bot resuelve los picks del día anterior contra los box scores reales de ESPN y ajusta los umbrales de EV:
 - Hit rate histórica ≥ 65% → umbral más permisivo (×0.80)
 - Hit rate histórica ≤ 38% → umbral más estricto (×1.35)
+
+---
+
+## Parlays — reglas de elegibilidad
+
+Los picks se excluyen de **todas las combinadas** si:
+- El jugador está marcado como **Day-To-Day / Questionable** (riesgo de DNP)
+- El jugador está en **Back-to-Back y confianza < Alta**
+
+> **Lección aprendida (10/04/2026):** Stephon Castle (DTD) era una pata en las 4 combinadas del día. No jugó (DNP). Todas las combinadas se perdieron.
 
 ---
 
@@ -113,8 +151,18 @@ nba-daily-dream-bet/
 │   ├── history.py                 # Backtesting + calibración de umbrales
 │   ├── formatter.py               # Formateador HTML para Telegram
 │   └── telegram_client.py         # Envío con splitting automático
+├── agents/
+│   ├── orchestrator.py            # Coordinador del pipeline multi-agent
+│   ├── base_agent.py              # Clase base con tool use loop + retry
+│   ├── system_prompts.py          # Prompts en español argentino
+│   ├── subagent_data_validator.py
+│   ├── subagent_projection.py     # Monte Carlo bootstrap + normal
+│   ├── subagent_news_intelligence.py # ESPN/Rotoworld con tool_use
+│   ├── subagent_ev_optimizer.py   # Cholesky MC para joint probs
+│   ├── subagent_narrator.py       # Generador de mensaje Telegram
+│   └── subagent_auto_calibrator.py
 ├── data/
-│   ├── picks_history.json         # Historial de picks con resultados
+│   ├── picks_history.json         # Historial de picks con resultados reales
 │   └── injury_overrides.json      # Overrides manuales de lesiones por fecha
 ├── .github/workflows/
 │   └── daily_nba_pick.yml         # GitHub Actions: 14:00 hs ARG (17:00 UTC)
@@ -131,10 +179,9 @@ nba-daily-dream-bet/
 | [The Odds API v4](https://the-odds-api.com/) | Props + spreads + totales | API Key |
 | [ESPN public API](https://site.api.espn.com/) | Box scores + lesiones | Sin auth |
 | [SportsData.io](https://sportsdata.io/) | Pace/DEF_RATING + proyecciones | API Key |
+| [odds-api.io MCP](https://odds-api.io/) | Odds en tiempo real para análisis manual | API Key |
 | [Rotowire](https://www.rotowire.com/) | Lesiones (fallback) | Sin auth |
 | [Telegram Bot API](https://core.telegram.org/bots/api) | Envío de mensajes | Bot Token |
-
-> **Nota:** The Odds API en plan gratuito tiene 500 requests/mes. Con 1 corrida diaria se consumen ~6 requests/día (1 por partido). Se recomienda el plan pago para uso en producción continuo.
 
 ---
 
@@ -153,6 +200,7 @@ ODDS_API_KEY=tu_key
 SPORTSDATA_API_KEY=tu_key
 TELEGRAM_BOT_TOKEN=tu_token
 TELEGRAM_CHAT_ID=tu_chat_id
+ANTHROPIC_API_KEY=tu_key  # opcional — activa sistema multi-agent
 ```
 
 Correr manualmente:
@@ -175,17 +223,17 @@ Secrets necesarios en `Settings → Secrets → Actions`:
 | `SPORTSDATA_API_KEY` | API key de SportsData.io |
 | `ANTHROPIC_API_KEY` | API key de Anthropic (para el sistema multi-agent) |
 
-> **Nota:** `ANTHROPIC_API_KEY` es opcional. Si no está seteada, el bot funciona con el formatter clásico. Con la key activa se habilita el sistema multi-agent completo.
+> `ANTHROPIC_API_KEY` es opcional. Si no está seteada, el bot funciona con el formatter clásico.
 
 ---
 
-## 🤖 Arquitectura Multi-Agent con Claude (Abril 2026)
+## 🤖 Arquitectura Multi-Agent con Claude
 
-A partir de Abril 2026, el bot incorpora un sistema multi-agent impulsado por **Anthropic Claude** que refina el análisis cuantitativo con razonamiento cualitativo en tiempo real. La arquitectura es 100% compatible con GitHub Actions y se activa automáticamente si `ANTHROPIC_API_KEY` está seteada.
+El bot incorpora un sistema multi-agent impulsado por **Claude (Anthropic)** que refina el análisis cuantitativo con razonamiento cualitativo en tiempo real. Se activa automáticamente si `ANTHROPIC_API_KEY` está seteada.
 
-### Principio de diseño: Claude refina, no reemplaza
+### Principio: Claude refina, no reemplaza
 
-El modelo cuantitativo (EV real, hit rates, Monte Carlo, calibración histórica) sigue siendo el núcleo. Claude actúa como una **capa de inteligencia cualitativa** encima: interpreta noticias, detecta inconsistencias y explica los picks con lenguaje natural.
+El modelo cuantitativo (hit rates, EV, Monte Carlo, calibración histórica) sigue siendo el núcleo. Claude actúa como una **capa cualitativa** encima: interpreta noticias, detecta inconsistencias y explica los picks.
 
 ### Los 6 Subagents
 
@@ -193,112 +241,54 @@ El modelo cuantitativo (EV real, hit rates, Monte Carlo, calibración histórica
 main.py
   └── Orchestrator
         ├── [1] DataValidatorAgent      — Valida consistencia de picks y proyecciones
-        ├── [2] NewsIntelligenceAgent   — Scraping ESPN/Rotoworld con tool_use de Claude
+        ├── [2] NewsIntelligenceAgent   — Scraping ESPN/Rotoworld con tool_use
         ├── [3] ProjectionAgent         — Monte Carlo 1000 sims + ajuste cualitativo
-        ├── [4] apply_refinements()     — Aplica factores News+MC a scores existentes
-        ├── [5] EVOptimizerAgent        — Cholesky MC (10K sims) para joint probs reales
+        ├── [4] apply_refinements()     — Aplica factores News+MC a scores
+        ├── [5] EVOptimizerAgent        — Cholesky MC (10K sims) para joint probs
         ├── [6] NarratorAgent           — Genera mensaje Telegram en español argentino
-        └── [7] AutoCalibratorAgent     — Sugerencias de mejora al modelo (post-análisis)
-```
-
-### Flujo de datos
-
-```
-analyzer.py → picks_by_game ─────────────────────────────────────────────┐
-                                                                           │
-  DataValidator → valida mismatch >5% en model_prob / inj status          │
-       ↓                                                                   │
-  NewsIntelligence → ESPN news API + Rotoworld scrape                     │
-       ↓           (Claude usa tool_use para decidir qué buscar)          │
-  ProjectionAgent → bootstrap MC + normal MC → P(stat > line)            │
-       ↓           (Claude interpreta divergencias vs model_prob)         │
-  apply_refinements() → modifica scores en picks_by_game (in-place)      │
-       ↓                                                                   │
-  EVOptimizer → Cholesky MC (ρ=0.30 same team, ρ=0.08 same game)         │
-       ↓        Claude elige el mejor parlay y da commentary              │
-  Narrator → genera mensaje HTML Telegram (claude-sonnet-4-6)            │
-       ↓                                                                   │
-  AutoCalibrator → analiza últimos 7 días → calibration_suggestions.json ┘
+        └── [7] AutoCalibratorAgent     — Sugerencias de mejora al modelo
 ```
 
 ### Monte Carlo Cholesky para parlays
 
-El `EVOptimizerAgent` implementa correlación explícita entre legs del mismo partido:
-
 ```python
-# Matriz de correlación
 ρ_same_team = 0.30   # Mismos compañeros → comparten pace/puntos del equipo
 ρ_same_game = 0.08   # Mismo partido → comparten pace general
 ρ_diff_game = 0.00   # Partidos distintos → independientes
-
-# Cholesky decomposition → muestras correlacionadas → joint probability
 ```
-
-Esto da probabilidades conjuntas más realistas que el simple producto de hit rates individuales.
-
-### Tool Use (NewsIntelligenceAgent)
-
-El agente de noticias usa 3 tools nativos de Anthropic:
-
-| Tool | Descripción |
-|---|---|
-| `fetch_espn_nba_news` | Top 20 noticias NBA del día (ESPN API) |
-| `fetch_espn_injury_report` | Injury report oficial NBA (ESPN) |
-| `fetch_rotoworld_player_news` | Noticias específicas por jugador (Rotowire scrape) |
-
-Claude decide qué jugadores buscar basado en los picks del día. Si detecta news relevante (ramp-up post-lesión, DNP-rest, coach quotes), ajusta el score del pick en ±5-20%.
-
-### Modelos usados
-
-| Agente | Modelo | Razón |
-|---|---|---|
-| DataValidator | claude-haiku-4-5 | Validación rápida y barata |
-| NewsIntelligence | claude-haiku-4-5 | Tool use ligero |
-| ProjectionAgent | claude-haiku-4-5 | Interpretación de MC |
-| EVOptimizer | claude-haiku-4-5 | Selección de parlays |
-| **Narrator** | **claude-sonnet-4-6** | Calidad máxima para el output visible |
-| AutoCalibrator | claude-haiku-4-5 | Análisis de calibración |
 
 ### Degradación graceful
 
-Si `ANTHROPIC_API_KEY` no está seteada, o si cualquier agente falla, el bot usa automáticamente el `formatter.py` clásico. No hay punto de falla único.
+Si cualquier agente falla, el bot usa automáticamente `formatter.py` clásico. No hay punto de falla único.
 
-```python
-if Orchestrator.is_available():
-    result = orch.run(...)
-    message = result.message
-else:
-    message = format_message(...)  # fallback clásico
-```
+---
 
-### Calibración automática
+## 📊 Historial de rendimiento
 
-Cada día, el `AutoCalibratorAgent` analiza los picks resueltos (backtesteados contra box scores reales) y guarda sugerencias en `data/calibration_suggestions.json`:
+| Fecha | Picks válidos | ✅ | ❌ | % | Notas |
+|---|---|---|---|---|---|
+| 07/04/2026 | 3 | 2 | 1 | 67% | |
+| 09/04/2026 | 13 | 7 | 6 | 54% | |
+| 10/04/2026 | 11 | 6 | 5 | 55% | 4 DNP (Castle×3, Jokic) |
+| 12/04/2026 | 8 | 5 | 3 | 63% | 1 DNP (Johnson rest) |
 
-```json
-{
-  "date": "2026-04-10",
-  "insights": ["player_rebounds está underperformando (52% HR vs 67% esperado)"],
-  "threshold_suggestions": {"MEDIA_HIT_RATE": 0.68},
-  "overall_assessment": "Modelo bien calibrado en puntos y asistencias"
-}
-```
+> Los DNP (jugadores que no jugaron) se contabilizan como void, no como miss.
 
-### Nuevos archivos
+---
 
-```
-agents/
-├── __init__.py
-├── base_agent.py                  # Clase base: Anthropic client + tool use loop + retry
-├── system_prompts.py              # Prompt maestro compartido (español argentino)
-├── subagent_data_validator.py     # Validación de consistencia
-├── subagent_projection.py         # Monte Carlo bootstrap + normal
-├── subagent_news_intelligence.py  # ESPN/Rotoworld scraping con tool_use
-├── subagent_ev_optimizer.py       # Cholesky MC para joint probs de parlays
-├── subagent_narrator.py           # Generador de mensaje Telegram
-├── subagent_auto_calibrator.py    # Sugerencias de calibración
-└── orchestrator.py                # Coordinador del pipeline
-data/
-└── calibration_suggestions.json  # Generado automáticamente cada día
-AGENTS.md                          # Documentación detallada de cada subagent
-```
+## Changelog
+
+### 2026-04-13
+
+**Mejoras al modelo basadas en análisis de picks 10/04 y 12/04:**
+
+- `analyzer.py` — **DTD/Questionable flag**: baja confianza un nivel + penalty en score para jugadores Day-To-Day
+- `analyzer.py` — **Blowout risk extendido a asistencias de estrellas**: el spread >12 ahora penaliza mercados de asistencias incluso para titulares
+- `analyzer.py` — **Per-player cap: máximo 2 picks por jugador** en el output final (evita cascada de fallos)
+- `analyzer.py` — **L5 divergence penalty**: penaliza si la forma reciente (L5) cayó significativamente vs el histórico (L15)
+- `analyzer.py` — **Triples low-line penalty**: Over ≤ 1.0 en triples recibe score × 0.88 por alta varianza
+- `parlay_builder.py` — **DTD players excluidos de todas las combinadas** (`_is_parlay_eligible()`)
+- `escalera.py` — **DTD penalty -5.0** en scoring de escalera (un DNP destruye todos los escalones)
+- `formatter.py` — muestra `⚠️ DTD` explícito para jugadores Day-To-Day
+- `consistency_picks.py` — recibe `injury_statuses` para filtrar OUTs
+- `data/picks_history.json` — picks del 10/04 y 12/04 registrados con resultados reales y notas

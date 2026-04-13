@@ -43,6 +43,7 @@ def generate_consistency_picks(
     n_games: int = N_GAMES,
     min_hit_rate: float = MIN_HIT_RATE,
     max_picks: int = MAX_PICKS,
+    injury_statuses: dict[str, str | None] | None = None,
 ) -> list[dict]:
     """
     Return the best consistency picks for today sorted by hit rate.
@@ -70,6 +71,12 @@ def generate_consistency_picks(
         player     = prop["player"]
         market_key = prop["market_key"]
         line       = prop["line"]
+
+        # Skip confirmed OUT players
+        if injury_statuses:
+            status = injury_statuses.get(player, "")
+            if status and "out" in status.lower():
+                continue
 
         logs = player_logs.get(player, [])
         if not logs:

@@ -47,8 +47,36 @@ BLOWOUT_BENCH_MIN_AVG    = 28.0  # players averaging < this are role/bench playe
 BLOWOUT_SCORE_FACTOR     = 0.90  # score penalty for bench in blowout games
 
 # ── Multi-market same-player boost ────────────────────────────────────────────
-MULTI_PICK_MIN_COUNT  = 3     # minimum number of picks from same player to boost
-MULTI_PICK_SCORE_BOOST = 1.06  # score multiplier when player hits 3+ markets
+MULTI_PICK_MIN_COUNT  = 2     # minimum number of picks from same player to boost
+MULTI_PICK_SCORE_BOOST = 1.06  # score multiplier when player hits 2+ markets
+
+# ── Per-player stacking cap ───────────────────────────────────────────────────
+MAX_PICKS_PER_PLAYER = 2      # max picks per player in final output (avoid cascade failures)
+
+# ── Day-To-Day / Questionable: downgrade confidence ──────────────────────────
+DTD_KEYWORDS = {"day-to-day", "questionable"}
+
+# ── L5 vs L15 hit-rate divergence penalty (recent underperformance) ───────────
+L5_DIVERGENCE_SEVERE     = 0.60   # L5_hr / L15_hr below this → severe penalty
+L5_DIVERGENCE_MILD       = 0.75   # L5_hr / L15_hr below this → mild penalty
+L5_DIVERGENCE_SCORE_SEVERE = 0.87
+L5_DIVERGENCE_SCORE_MILD   = 0.93
+
+# ── Blowout risk: extends to assists markets for ALL players ──────────────────
+# Even stars generate fewer assists when a game is a blowout (game flow changes)
+BLOWOUT_STAR_ASSISTS_FACTOR = 0.93
+
+# ── Assists-based markets (most sensitive to game flow / blowout risk) ────────
+ASSISTS_MARKETS = {
+    "player_assists",
+    "player_points_assists",
+    "player_rebounds_assists",
+    "player_points_rebounds_assists",
+}
+
+# ── Low-line triples penalty (Over ≤ 1.0 = high noise, low signal) ───────────
+TRIPLES_LOW_LINE_THRESHOLD = 1.0
+TRIPLES_LOW_LINE_FACTOR    = 0.88
 
 # Markets where opponent defensive quality matters (offensive props)
 OFFENSIVE_MARKETS = {
@@ -94,6 +122,7 @@ class PlayerPick:
 
     confidence: str          # "Alta", "Media", "Baja"
     is_b2b: bool
+    is_dtd: bool = False     # Day-To-Day / Questionable (flagged for parlay exclusion)
     score: float = 0.0
 
     injury_status: str | None = None
@@ -320,6 +349,9 @@ def analyze_player_props(
             if (projections[player].get("inj_status") or "").lower() == "out":
                 continue
 
+        # Flag Day-To-Day / Questionable (used later to downgrade confidence)
+        is_dtd = bool(inj and any(kw in inj.lower() for kw in DTD_KEYWORDS))
+
         logs = player_logs.get(player, [])
         if not logs:
             continue
@@ -333,13 +365,25 @@ def analyze_player_props(
             continue
 
         hit_rate_l15 = stats["hit_count_l15"] / stats["games_l15"]
+        hr_l5        = stats["hit_count_l5"] / stats["games_l5"] if stats["games_l5"] > 0 else 0.0
         confidence   = _assign_confidence(hit_rate_l15, stats["avg_l15"], line)
 
         # ── Steals Over high-line: extra strict (market muy volátil) ──────────
         if market_key == "player_steals" and line >= STEALS_OVER_HIGH_LINE:
-            hr_l5 = stats["hit_count_l5"] / stats["games_l5"] if stats["games_l5"] > 0 else 0.0
             if hit_rate_l15 < STEALS_MIN_HIT_L15 or hr_l5 < STEALS_MIN_HIT_L5:
                 continue
+
+        # ── Low-line triples: alta varianza, señal débil ────────────────────
+        if market_key == "player_threes" and line <= TRIPLES_LOW_LINE_THRESHOLD:
+            # No se elimina, pero se penaliza en score para salir más abajo
+            pass  # penalty applied below after base score
+
+        # ── Day-To-Day: downgrade confidence one level + score penalty ────────
+        if is_dtd:
+            if confidence == "Alta":
+                confidence = "Media"
+            elif confidence == "Media":
+                confidence = "Baja"
 
         # B2B: downgrade confidence one level
         is_b2b = bool(game_team_abbrs.get(game_label, set()) & b2b_team_abbrs)
@@ -352,6 +396,21 @@ def analyze_player_props(
         # Base score: hit rate primary, edge secondary
         edge_ratio = (stats["avg_l15"] / line) if line > 0 else 1.0
         score = hit_rate_l15 * 0.70 + min(edge_ratio - 1.0, 0.50) * 0.30
+
+        # ── L5 vs L15 divergence: recent underperformance is a warning signal ──
+        # If a player is doing worse recently vs their historical rate, penalize.
+        if hit_rate_l15 > 0:
+            l5_l15_ratio = hr_l5 / hit_rate_l15
+            if l5_l15_ratio < L5_DIVERGENCE_SEVERE:
+                score *= L5_DIVERGENCE_SCORE_SEVERE
+                if confidence == "Alta":
+                    confidence = "Media"
+            elif l5_l15_ratio < L5_DIVERGENCE_MILD:
+                score *= L5_DIVERGENCE_SCORE_MILD
+
+        # ── Low-line triples penalty ──────────────────────────────────────────
+        if market_key == "player_threes" and line <= TRIPLES_LOW_LINE_THRESHOLD:
+            score *= TRIPLES_LOW_LINE_FACTOR
 
         # ── Minutes variability penalty (bench/role players con minutos erráticos)
         min_cv = _get_minutes_cv(logs)
@@ -417,15 +476,24 @@ def analyze_player_props(
                     score *= 0.93
                     proj_hits += 1
 
-        # ── Blowout risk: penaliza bench players en partidos muy desiguales ─────
+        # ── Blowout risk ──────────────────────────────────────────────────────
+        # Bench players (<28 min avg): broad penalty on all stats
+        # Star players (≥28 min avg): penalty only on assists markets (game flow)
         avg_min = _get_avg_minutes(logs)
-        if avg_min < BLOWOUT_BENCH_MIN_AVG and game_lines:
+        if game_lines:
             game_id_for_lines = game_label_to_id.get(game_label)
             if game_id_for_lines:
                 gl = game_lines.get(game_id_for_lines, {})
                 spread = gl.get("spread")
                 if spread is not None and abs(spread) > BLOWOUT_SPREAD_THRESHOLD:
-                    score *= BLOWOUT_SCORE_FACTOR
+                    if avg_min < BLOWOUT_BENCH_MIN_AVG:
+                        # Bench/role player in blowout: full penalty
+                        score *= BLOWOUT_SCORE_FACTOR
+                    elif market_key in ASSISTS_MARKETS:
+                        # Star player: assists cratered by lopsided game flow
+                        score *= BLOWOUT_STAR_ASSISTS_FACTOR
+                        if confidence == "Alta":
+                            confidence = "Media"
 
         # ── Compute real model probability and EV% ────────────────────────────
         m_prob = _compute_model_prob(stats)
@@ -451,6 +519,7 @@ def analyze_player_props(
             consecutive_streak=stats["consecutive_streak"],
             confidence=confidence,
             is_b2b=is_b2b,
+            is_dtd=is_dtd,
             injury_status=inj,
             score=round(score, 4),
             ev_pct=ev,
@@ -487,8 +556,9 @@ def analyze_player_props(
     if len(pool) < 5:
         pool = pool + baja_picks
 
-    # Apply per-game and total caps
+    # Apply per-game, per-player, and total caps
     picks_by_game: dict[str, list[PlayerPick]] = {}
+    player_pick_counts_final: dict[str, int] = {}
     total = 0
     for pick in pool:
         if total >= MAX_TOTAL_PICKS:
@@ -496,7 +566,11 @@ def analyze_player_props(
         game_picks = picks_by_game.setdefault(pick.game_label, [])
         if len(game_picks) >= MAX_PICKS_PER_GAME:
             continue
+        # Per-player cap: avoid cascade failures from stacking same player
+        if player_pick_counts_final.get(pick.player, 0) >= MAX_PICKS_PER_PLAYER:
+            continue
         game_picks.append(pick)
+        player_pick_counts_final[pick.player] = player_pick_counts_final.get(pick.player, 0) + 1
         total += 1
 
     # ── Claude qualitative refinements (optional, injected by Orchestrator) ──────

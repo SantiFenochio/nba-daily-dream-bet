@@ -224,7 +224,7 @@ async def main():
 
         # ── 12c. Picks de Consistencia ────────────────────────────────────────
         print("[main] Building consistency picks...")
-        consistency = generate_consistency_picks(player_logs, prop_records)
+        consistency = generate_consistency_picks(player_logs, prop_records, injury_statuses=injury_statuses)
         print(f"[main] Consistency picks: {len(consistency)}")
 
         # ── 13. Record today's picks in history (hit=None, filled tomorrow) ──

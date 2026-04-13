@@ -70,6 +70,19 @@ def _make_parlay(name: str, legs: list[PlayerPick]) -> dict:
     }
 
 
+def _is_parlay_eligible(pick: PlayerPick) -> bool:
+    """
+    A pick should not appear in any parlay if:
+      - Player is Day-To-Day / Questionable (DNP risk kills the whole ticket)
+      - Player is on B2B AND confidence < Alta (double uncertainty)
+    """
+    if getattr(pick, "is_dtd", False):
+        return False
+    if pick.is_b2b and pick.confidence != "Alta":
+        return False
+    return True
+
+
 def build_parlays(
     picks_by_game: dict[str, list[PlayerPick]],
     n_parlays: int = 4,   # kept for API compat with main.py, ignored internally
@@ -77,6 +90,9 @@ def build_parlays(
 ) -> list[dict]:
     """
     Build 4 named parlays from today's picks.
+
+    DTD / Questionable players are excluded from all parlays (DNP risk).
+    B2B players below Alta confidence are also excluded.
 
     Returns list of dicts compatible with formatter.py:
       {
@@ -89,9 +105,15 @@ def build_parlays(
     """
     all_picks = [p for picks in picks_by_game.values() for p in picks]
 
-    alta  = sorted([p for p in all_picks if p.confidence == "Alta"],
+    # Filter out risky picks for parlay eligibility
+    eligible = [p for p in all_picks if _is_parlay_eligible(p)]
+    excluded = len(all_picks) - len(eligible)
+    if excluded:
+        print(f"[parlay_builder] {excluded} picks excluded from parlays (DTD/B2B-Media risk)")
+
+    alta  = sorted([p for p in eligible if p.confidence == "Alta"],
                    key=lambda p: -_hit_rate_l15(p))
-    media = sorted([p for p in all_picks if p.confidence == "Media"],
+    media = sorted([p for p in eligible if p.confidence == "Media"],
                    key=lambda p: -_hit_rate_l15(p))
     alta_media = sorted(alta + media, key=lambda p: -_hit_rate_l15(p))
 

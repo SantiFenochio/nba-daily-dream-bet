@@ -145,7 +145,8 @@ def _format_pick(pick: PlayerPick) -> list[str]:
         out.append("⚠️ Back-to-back hoy — confianza reducida")
 
     if pick.injury_status and "out" not in pick.injury_status.lower():
-        out.append(f"🚨 Estado: {_h(pick.injury_status)}")
+        dtd_flag = "⚠️ DTD" if getattr(pick, "is_dtd", False) else "🚨"
+        out.append(f"{dtd_flag} Estado: {_h(pick.injury_status)} — riesgo de no jugar")
 
     # Never-miss signal
     if pick.min_l10 > pick.line:
