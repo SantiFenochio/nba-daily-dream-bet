@@ -1017,5 +1017,72 @@
       "actual": 42.0,
       "notes": "27+11+4=42"
     }
+  ],
+  "2026-04-14": [
+    {
+      "player": "Oso Ighodaro",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 9.5,
+      "ev_pct": 35.35,
+      "model_prob": 0.73,
+      "score": 0.6999,
+      "confidence": "Alta",
+      "game": "Portland Trail Blazers @ Phoenix Suns",
+      "hit": null
+    },
+    {
+      "player": "Oso Ighodaro",
+      "market": "Rebotes",
+      "market_key": "player_rebounds",
+      "side": "over",
+      "line": 4.5,
+      "ev_pct": 45.37,
+      "model_prob": 0.73,
+      "score": 0.6813,
+      "confidence": "Alta",
+      "game": "Portland Trail Blazers @ Phoenix Suns",
+      "hit": null
+    },
+    {
+      "player": "Jordan Goodwin",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 12.5,
+      "ev_pct": 18.59,
+      "model_prob": 0.66,
+      "score": 0.5538,
+      "confidence": "Media",
+      "game": "Portland Trail Blazers @ Phoenix Suns",
+      "hit": null
+    },
+    {
+      "player": "Jaime Jaquez Jr",
+      "market": "Pts+Ast",
+      "market_key": "player_points_assists",
+      "side": "over",
+      "line": 16.5,
+      "ev_pct": 50.01,
+      "model_prob": 0.7675,
+      "score": 0.6642,
+      "confidence": "Media",
+      "game": "Miami Heat @ Charlotte Hornets",
+      "hit": null
+    },
+    {
+      "player": "Davion Mitchell",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 11.5,
+      "ev_pct": 36.68,
+      "model_prob": 0.73,
+      "score": 0.5828,
+      "confidence": "Media",
+      "game": "Miami Heat @ Charlotte Hornets",
+      "hit": null
+    }
   ]
 }
