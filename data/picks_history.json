@@ -1020,6 +1020,73 @@
   ],
   "2026-04-14": [
     {
+      "player": "Oso Ighodaro",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 9.5,
+      "ev_pct": 35.35,
+      "model_prob": 0.73,
+      "score": 0.6999,
+      "confidence": "Alta",
+      "game": "Portland Trail Blazers @ Phoenix Suns",
+      "hit": null
+    },
+    {
+      "player": "Oso Ighodaro",
+      "market": "Rebotes",
+      "market_key": "player_rebounds",
+      "side": "over",
+      "line": 4.5,
+      "ev_pct": 45.37,
+      "model_prob": 0.73,
+      "score": 0.6813,
+      "confidence": "Alta",
+      "game": "Portland Trail Blazers @ Phoenix Suns",
+      "hit": null
+    },
+    {
+      "player": "Jordan Goodwin",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 12.5,
+      "ev_pct": 18.59,
+      "model_prob": 0.66,
+      "score": 0.5538,
+      "confidence": "Media",
+      "game": "Portland Trail Blazers @ Phoenix Suns",
+      "hit": null
+    },
+    {
+      "player": "Jaime Jaquez Jr",
+      "market": "Pts+Ast",
+      "market_key": "player_points_assists",
+      "side": "over",
+      "line": 16.5,
+      "ev_pct": 50.01,
+      "model_prob": 0.7675,
+      "score": 0.6642,
+      "confidence": "Media",
+      "game": "Miami Heat @ Charlotte Hornets",
+      "hit": true,
+      "actual_note": "13pts + 8ast = 21 PA. OVER 16.5 HIT."
+    },
+    {
+      "player": "Davion Mitchell",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 11.5,
+      "ev_pct": 36.68,
+      "model_prob": 0.73,
+      "score": 0.5828,
+      "confidence": "Media",
+      "game": "Miami Heat @ Charlotte Hornets",
+      "hit": true,
+      "actual_note": "Mitchell 28pts + reb en MIA. HIT holgado solo en puntos."
+    },
+    {
       "player": "LaMelo Ball",
       "market": "Puntos",
       "market_key": "player_points",
@@ -1027,11 +1094,12 @@
       "line": 23.5,
       "ev_pct": null,
       "model_prob": null,
+      "score": null,
       "confidence": "Alta",
       "game": "Miami Heat @ Charlotte Hornets",
       "hit": true,
       "actual": 30,
-      "notes": "CHA 127 - MIA 126 OT. Play-In Win. LaMelo game-winning layup con 4.7s en OT. 30pts/5reb/10ast."
+      "notes": "CHA 127-126 OT. Game-winning layup. 30pts/5reb/10ast."
     },
     {
       "player": "LaMelo Ball",
@@ -1041,11 +1109,12 @@
       "line": 36.5,
       "ev_pct": null,
       "model_prob": null,
+      "score": null,
       "confidence": "Alta",
       "game": "Miami Heat @ Charlotte Hornets",
       "hit": true,
       "actual": 45,
-      "notes": "30pts + 5reb + 10ast = 45 PRA. HIT holgado."
+      "notes": "30pts + 5reb + 10ast = 45. HIT holgado."
     },
     {
       "player": "Miles Bridges",
@@ -1055,11 +1124,12 @@
       "line": 14.5,
       "ev_pct": null,
       "model_prob": null,
+      "score": null,
       "confidence": "Alta",
       "game": "Miami Heat @ Charlotte Hornets",
       "hit": true,
       "actual": 28,
-      "notes": "28pts/9reb. Block decisivo en el buzzer. Partido espectacular."
+      "notes": "28pts/9reb. Block ganador en el buzzer."
     },
     {
       "player": "Deni Avdija",
@@ -1069,11 +1139,12 @@
       "line": 38.5,
       "ev_pct": null,
       "model_prob": null,
+      "score": null,
       "confidence": "Alta",
       "game": "Portland Trail Blazers @ Phoenix Suns",
       "hit": true,
       "actual": 60,
-      "notes": "POR 114-110 PHX. 41pts/7reb/12ast = 60 PRA. Go-ahead 3PT play con 16.1s restantes. Heroico."
+      "notes": "41pts/7reb/12ast = 60 PRA. Heroico. 3PT play con 16.1s."
     },
     {
       "player": "Deni Avdija",
@@ -1083,11 +1154,12 @@
       "line": 6.5,
       "ev_pct": null,
       "model_prob": null,
+      "score": null,
       "confidence": "Alta",
       "game": "Portland Trail Blazers @ Phoenix Suns",
       "hit": true,
       "actual": 12,
-      "notes": "12 asistencias. HIT masivo. Avdija fue el MVP total del Play-In."
+      "notes": "12 asistencias. MVP del Play-In."
     },
     {
       "player": "Devin Booker",
@@ -1097,11 +1169,12 @@
       "line": 26.5,
       "ev_pct": null,
       "model_prob": null,
+      "score": null,
       "confidence": "Media",
       "game": "Portland Trail Blazers @ Phoenix Suns",
       "hit": false,
       "actual": 22,
-      "notes": "PHX pierde 110-114. Booker 22pts, 4.5 bajo la linea. Avdija fue demasiado."
+      "notes": "PHX pierde. Booker 22pts, 4.5 bajo linea. Avdija fue demasiado."
     },
     {
       "player": "Bam Adebayo",
@@ -1111,11 +1184,79 @@
       "line": 20.5,
       "ev_pct": null,
       "model_prob": null,
+      "score": null,
       "confidence": "Condicional",
       "game": "Miami Heat @ Charlotte Hornets",
       "hit": null,
       "actual": 6,
-      "notes": "VOID — Salió lesionado en el 2do cuarto (lumbar). Solo 11 minutos jugados. Pick era condicional."
+      "notes": "VOID — lesion lumbar 2do cuarto, 11 min jugados. Pick condicional."
+    }
+  ],
+  "2026-04-15": [
+    {
+      "player": "Tristan da Silva",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 11.5,
+      "ev_pct": 34.29,
+      "model_prob": 0.6867,
+      "score": 0.6525,
+      "confidence": "Media",
+      "game": "Orlando Magic @ Philadelphia 76ers",
+      "hit": null
+    },
+    {
+      "player": "Quentin Grimes",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 13.5,
+      "ev_pct": 9.21,
+      "model_prob": 0.59,
+      "score": 0.5045,
+      "confidence": "Media",
+      "game": "Orlando Magic @ Philadelphia 76ers",
+      "hit": null
+    },
+    {
+      "player": "Gui Santos",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 16.5,
+      "ev_pct": 25.72,
+      "model_prob": 0.6975,
+      "score": 0.6239,
+      "confidence": "Media",
+      "game": "Golden State Warriors @ LA Clippers",
+      "hit": null
+    },
+    {
+      "player": "Bennedict Mathurin",
+      "market": "Reb+Ast",
+      "market_key": "player_rebounds_assists",
+      "side": "over",
+      "line": 6.5,
+      "ev_pct": 27.85,
+      "model_prob": 0.6827,
+      "score": 0.5907,
+      "confidence": "Media",
+      "game": "Golden State Warriors @ LA Clippers",
+      "hit": null
+    },
+    {
+      "player": "John Collins",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 17.5,
+      "ev_pct": 37.61,
+      "model_prob": 0.7443,
+      "score": 0.556,
+      "confidence": "Media",
+      "game": "Golden State Warriors @ LA Clippers",
+      "hit": null
     }
   ]
 }
