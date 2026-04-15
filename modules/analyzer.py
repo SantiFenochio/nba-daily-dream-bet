@@ -78,6 +78,15 @@ ASSISTS_MARKETS = {
 TRIPLES_LOW_LINE_THRESHOLD = 1.0
 TRIPLES_LOW_LINE_FACTOR    = 0.88
 
+# ── Playoff / Play-In mode ────────────────────────────────────────────────────
+# Set True during NBA Playoffs / Play-In Tournament (usually April 15 onwards).
+# Effects:
+#   - Blowout risk is suppressed entirely (teams play all-out, no tanking/rest)
+#   - Alta picks receive a small motivation boost (stars play max minutes)
+#   - Underdog defensive penalty is noted but handled via confidence override
+PLAYOFF_MODE         = False  # Toggle manually when bot runs in playoff season
+PLAYOFF_STAR_BOOST   = 1.05   # Score multiplier for Alta picks in playoff context
+
 # Markets where opponent defensive quality matters (offensive props)
 OFFENSIVE_MARKETS = {
     "player_points", "player_rebounds", "player_assists",
@@ -485,7 +494,7 @@ def analyze_player_props(
             if game_id_for_lines:
                 gl = game_lines.get(game_id_for_lines, {})
                 spread = gl.get("spread")
-                if spread is not None and abs(spread) > BLOWOUT_SPREAD_THRESHOLD:
+                if not PLAYOFF_MODE and spread is not None and abs(spread) > BLOWOUT_SPREAD_THRESHOLD:
                     if avg_min < BLOWOUT_BENCH_MIN_AVG:
                         # Bench/role player in blowout: full penalty
                         score *= BLOWOUT_SCORE_FACTOR
@@ -494,6 +503,10 @@ def analyze_player_props(
                         score *= BLOWOUT_STAR_ASSISTS_FACTOR
                         if confidence == "Alta":
                             confidence = "Media"
+
+        # ── Playoff / Play-In motivation boost ───────────────────────────────
+        if PLAYOFF_MODE and confidence == "Alta":
+            score *= PLAYOFF_STAR_BOOST
 
         # ── Compute real model probability and EV% ────────────────────────────
         m_prob = _compute_model_prob(stats)

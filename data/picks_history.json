@@ -1017,5 +1017,105 @@
       "actual": 42.0,
       "notes": "27+11+4=42"
     }
+  ],
+  "2026-04-14": [
+    {
+      "player": "LaMelo Ball",
+      "market": "Puntos",
+      "market_key": "player_points",
+      "side": "Over",
+      "line": 23.5,
+      "ev_pct": null,
+      "model_prob": null,
+      "confidence": "Alta",
+      "game": "Miami Heat @ Charlotte Hornets",
+      "hit": true,
+      "actual": 30,
+      "notes": "CHA 127 - MIA 126 OT. Play-In Win. LaMelo game-winning layup con 4.7s en OT. 30pts/5reb/10ast."
+    },
+    {
+      "player": "LaMelo Ball",
+      "market": "PRA",
+      "market_key": "player_points_rebounds_assists",
+      "side": "Over",
+      "line": 36.5,
+      "ev_pct": null,
+      "model_prob": null,
+      "confidence": "Alta",
+      "game": "Miami Heat @ Charlotte Hornets",
+      "hit": true,
+      "actual": 45,
+      "notes": "30pts + 5reb + 10ast = 45 PRA. HIT holgado."
+    },
+    {
+      "player": "Miles Bridges",
+      "market": "Puntos",
+      "market_key": "player_points",
+      "side": "Over",
+      "line": 14.5,
+      "ev_pct": null,
+      "model_prob": null,
+      "confidence": "Alta",
+      "game": "Miami Heat @ Charlotte Hornets",
+      "hit": true,
+      "actual": 28,
+      "notes": "28pts/9reb. Block decisivo en el buzzer. Partido espectacular."
+    },
+    {
+      "player": "Deni Avdija",
+      "market": "PRA",
+      "market_key": "player_points_rebounds_assists",
+      "side": "Over",
+      "line": 38.5,
+      "ev_pct": null,
+      "model_prob": null,
+      "confidence": "Alta",
+      "game": "Portland Trail Blazers @ Phoenix Suns",
+      "hit": true,
+      "actual": 60,
+      "notes": "POR 114-110 PHX. 41pts/7reb/12ast = 60 PRA. Go-ahead 3PT play con 16.1s restantes. Heroico."
+    },
+    {
+      "player": "Deni Avdija",
+      "market": "Asistencias",
+      "market_key": "player_assists",
+      "side": "Over",
+      "line": 6.5,
+      "ev_pct": null,
+      "model_prob": null,
+      "confidence": "Alta",
+      "game": "Portland Trail Blazers @ Phoenix Suns",
+      "hit": true,
+      "actual": 12,
+      "notes": "12 asistencias. HIT masivo. Avdija fue el MVP total del Play-In."
+    },
+    {
+      "player": "Devin Booker",
+      "market": "Puntos",
+      "market_key": "player_points",
+      "side": "Over",
+      "line": 26.5,
+      "ev_pct": null,
+      "model_prob": null,
+      "confidence": "Media",
+      "game": "Portland Trail Blazers @ Phoenix Suns",
+      "hit": false,
+      "actual": 22,
+      "notes": "PHX pierde 110-114. Booker 22pts, 4.5 bajo la linea. Avdija fue demasiado."
+    },
+    {
+      "player": "Bam Adebayo",
+      "market": "Puntos",
+      "market_key": "player_points",
+      "side": "Over",
+      "line": 20.5,
+      "ev_pct": null,
+      "model_prob": null,
+      "confidence": "Condicional",
+      "game": "Miami Heat @ Charlotte Hornets",
+      "hit": null,
+      "actual": 6,
+      "notes": "VOID — Salió lesionado en el 2do cuarto (lumbar). Solo 11 minutos jugados. Pick era condicional."
+    }
   ]
 }
