@@ -1084,5 +1084,72 @@
       "game": "Miami Heat @ Charlotte Hornets",
       "hit": null
     }
+  ],
+  "2026-04-15": [
+    {
+      "player": "Tristan da Silva",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 11.5,
+      "ev_pct": 34.29,
+      "model_prob": 0.6867,
+      "score": 0.6525,
+      "confidence": "Media",
+      "game": "Orlando Magic @ Philadelphia 76ers",
+      "hit": null
+    },
+    {
+      "player": "Quentin Grimes",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 13.5,
+      "ev_pct": 9.21,
+      "model_prob": 0.59,
+      "score": 0.5045,
+      "confidence": "Media",
+      "game": "Orlando Magic @ Philadelphia 76ers",
+      "hit": null
+    },
+    {
+      "player": "Gui Santos",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 16.5,
+      "ev_pct": 25.72,
+      "model_prob": 0.6975,
+      "score": 0.6239,
+      "confidence": "Media",
+      "game": "Golden State Warriors @ LA Clippers",
+      "hit": null
+    },
+    {
+      "player": "Bennedict Mathurin",
+      "market": "Reb+Ast",
+      "market_key": "player_rebounds_assists",
+      "side": "over",
+      "line": 6.5,
+      "ev_pct": 27.85,
+      "model_prob": 0.6827,
+      "score": 0.5907,
+      "confidence": "Media",
+      "game": "Golden State Warriors @ LA Clippers",
+      "hit": null
+    },
+    {
+      "player": "John Collins",
+      "market": "Pts+Reb",
+      "market_key": "player_points_rebounds",
+      "side": "over",
+      "line": 17.5,
+      "ev_pct": 37.61,
+      "model_prob": 0.7443,
+      "score": 0.556,
+      "confidence": "Media",
+      "game": "Golden State Warriors @ LA Clippers",
+      "hit": null
+    }
   ]
 }
