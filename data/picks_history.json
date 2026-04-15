@@ -1070,7 +1070,7 @@
       "confidence": "Media",
       "game": "Miami Heat @ Charlotte Hornets",
       "hit": true,
-      "actual_note": "13pts + 8ast = 21 PA. OVER 16.5 HIT."
+      "notes": "13pts + 8ast = 21 PA. OVER 16.5 HIT."
     },
     {
       "player": "Davion Mitchell",
@@ -1084,7 +1084,7 @@
       "confidence": "Media",
       "game": "Miami Heat @ Charlotte Hornets",
       "hit": true,
-      "actual_note": "Mitchell 28pts + reb en MIA. HIT holgado solo en puntos."
+      "notes": "Mitchell 28pts en MIA@CHA. HIT holgado."
     },
     {
       "player": "LaMelo Ball",
@@ -1094,12 +1094,11 @@
       "line": 23.5,
       "ev_pct": null,
       "model_prob": null,
-      "score": null,
       "confidence": "Alta",
       "game": "Miami Heat @ Charlotte Hornets",
       "hit": true,
       "actual": 30,
-      "notes": "CHA 127-126 OT. Game-winning layup. 30pts/5reb/10ast."
+      "notes": "CHA 127-126 OT. 30pts/5reb/10ast."
     },
     {
       "player": "LaMelo Ball",
@@ -1109,12 +1108,11 @@
       "line": 36.5,
       "ev_pct": null,
       "model_prob": null,
-      "score": null,
       "confidence": "Alta",
       "game": "Miami Heat @ Charlotte Hornets",
       "hit": true,
       "actual": 45,
-      "notes": "30pts + 5reb + 10ast = 45. HIT holgado."
+      "notes": "30+5+10=45. HIT holgado."
     },
     {
       "player": "Miles Bridges",
@@ -1124,12 +1122,11 @@
       "line": 14.5,
       "ev_pct": null,
       "model_prob": null,
-      "score": null,
       "confidence": "Alta",
       "game": "Miami Heat @ Charlotte Hornets",
       "hit": true,
       "actual": 28,
-      "notes": "28pts/9reb. Block ganador en el buzzer."
+      "notes": "28pts/9reb. Block ganador."
     },
     {
       "player": "Deni Avdija",
@@ -1139,12 +1136,11 @@
       "line": 38.5,
       "ev_pct": null,
       "model_prob": null,
-      "score": null,
       "confidence": "Alta",
       "game": "Portland Trail Blazers @ Phoenix Suns",
       "hit": true,
       "actual": 60,
-      "notes": "41pts/7reb/12ast = 60 PRA. Heroico. 3PT play con 16.1s."
+      "notes": "41pts/7reb/12ast=60. Heroico."
     },
     {
       "player": "Deni Avdija",
@@ -1154,12 +1150,11 @@
       "line": 6.5,
       "ev_pct": null,
       "model_prob": null,
-      "score": null,
       "confidence": "Alta",
       "game": "Portland Trail Blazers @ Phoenix Suns",
       "hit": true,
       "actual": 12,
-      "notes": "12 asistencias. MVP del Play-In."
+      "notes": "12 ast. MVP Play-In."
     },
     {
       "player": "Devin Booker",
@@ -1169,12 +1164,11 @@
       "line": 26.5,
       "ev_pct": null,
       "model_prob": null,
-      "score": null,
       "confidence": "Media",
       "game": "Portland Trail Blazers @ Phoenix Suns",
       "hit": false,
       "actual": 22,
-      "notes": "PHX pierde. Booker 22pts, 4.5 bajo linea. Avdija fue demasiado."
+      "notes": "PHX pierde 110-114. 22pts."
     },
     {
       "player": "Bam Adebayo",
@@ -1184,12 +1178,11 @@
       "line": 20.5,
       "ev_pct": null,
       "model_prob": null,
-      "score": null,
       "confidence": "Condicional",
       "game": "Miami Heat @ Charlotte Hornets",
       "hit": null,
       "actual": 6,
-      "notes": "VOID — lesion lumbar 2do cuarto, 11 min jugados. Pick condicional."
+      "notes": "VOID. Lesion lumbar Q2, 11 min."
     }
   ],
   "2026-04-15": [
