@@ -87,6 +87,29 @@ TRIPLES_LOW_LINE_FACTOR    = 0.88
 PLAYOFF_MODE         = False  # Toggle manually when bot runs in playoff season
 PLAYOFF_STAR_BOOST   = 1.05   # Score multiplier for Alta picks in playoff context
 
+# ── Elite defender matchup penalty (learned from 15/04 Kawhi vs Draymond) ────
+# When a star scorer faces an elite individual defender on the opposing team,
+# their scoring can be capped significantly — especially in crunch time.
+# Example: Draymond shut Kawhi out for all of Q4 (except last 16s) → 21 pts vs 28.5 line.
+ELITE_DEFENDERS = {
+    "Draymond Green", "OG Anunoby", "Jrue Holiday", "Herb Jones",
+    "Alex Caruso", "Lu Dort", "Dyson Daniels", "Matisse Thybulle",
+    "Kris Dunn", "Amen Thompson", "Jalen Suggs", "Jaden McDaniels",
+    "Derrick White", "Jalen Williams",
+}
+ELITE_DEFENDER_SCORING_FACTOR = 0.92  # Applied to scoring markets only
+ELITE_DEFENDER_SCORING_MARKETS = {
+    "player_points", "player_points_assists",
+    "player_points_rebounds", "player_points_rebounds_assists",
+}
+
+# ── High-volume / low-efficiency scorer variance penalty (learned from Banchero 18pts/7-22 FG) ──
+# Players who rely on high FGA volume are prone to cold shooting nights.
+# If a player takes > 18 FGA/game but shoots < 46% FG, their scoring prop has variance risk.
+HIGH_VOLUME_FGA_THRESHOLD = 18.0
+LOW_EFFICIENCY_FG_PCT     = 0.46
+HIGH_VOLUME_VARIANCE_FACTOR = 0.94  # Mild penalty on scoring confidence
+
 # Markets where opponent defensive quality matters (offensive props)
 OFFENSIVE_MARKETS = {
     "player_points", "player_rebounds", "player_assists",
@@ -299,6 +322,7 @@ def analyze_player_props(
     min_ev_threshold=None,
     projections=None,
     claude_refinements: dict[str, dict] | None = None,
+    opponent_rosters: dict[str, set[str]] | None = None,
 ) -> dict[str, list[PlayerPick]]:
     """
     Analyze player props and return picks_by_game.
@@ -428,12 +452,38 @@ def analyze_player_props(
             if confidence == "Alta":
                 confidence = "Media"
 
+        # ── High-volume / low-efficiency variance penalty ────────────────────
+        # Learned from 15/04: Banchero took 22 FGA at 32% FG → 18pts vs 23.5 line.
+        # High-volume scorers are prone to cold shooting nights — apply mild penalty
+        # to scoring markets for these profiles.
+        if market_key in ELITE_DEFENDER_SCORING_MARKETS and len(logs) >= MIN_GAMES_REQUIRED:
+            fga_values = [get_stat_value(g, "player_fga") or 0 for g in logs[:15]]
+            fgm_values = [get_stat_value(g, "player_fgm") or 0 for g in logs[:15]]
+            avg_fga = sum(fga_values) / len(fga_values) if fga_values else 0
+            total_fga = sum(fga_values)
+            total_fgm = sum(fgm_values)
+            fg_pct = total_fgm / total_fga if total_fga > 0 else 0.5
+            if avg_fga > HIGH_VOLUME_FGA_THRESHOLD and 0 < fg_pct < LOW_EFFICIENCY_FG_PCT:
+                score *= HIGH_VOLUME_VARIANCE_FACTOR
+                if confidence == "Alta":
+                    confidence = "Media"
+
         # ── Matchup multiplier (team_context) ─────────────────────────────────
         if team_context:
             player_team = (player_logs.get(player) or [{}])[0].get("TEAM_ABBREVIATION")
             if player_team:
                 game_abbrs = game_team_abbrs.get(game_label, set())
                 opp_team   = next((a for a in game_abbrs if a != player_team), None)
+
+                # ── Elite defender penalty (learned from 15/04 Kawhi vs Draymond) ──
+                # If any player in opp_team is in ELITE_DEFENDERS, apply penalty
+                # to star scoring props. Requires opponent_rosters dict (optional).
+                opp_roster = (opponent_rosters or {}).get(opp_team, set()) if opp_team else set()
+                if opp_roster and market_key in ELITE_DEFENDER_SCORING_MARKETS:
+                    if ELITE_DEFENDERS & set(opp_roster):
+                        score *= ELITE_DEFENDER_SCORING_FACTOR
+                        if confidence == "Alta" and avg_l15 < line * 1.15:
+                            confidence = "Media"
 
                 # Opponent defensive quality → affects offensive props
                 if opp_team and opp_team in team_context and market_key in OFFENSIVE_MARKETS:
